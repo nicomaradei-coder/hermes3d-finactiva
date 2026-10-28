@@ -1140,11 +1140,20 @@ export function OfficeScreen({
   }, [state.agents]);
   useEffect(() => {
     const now = Date.now();
-    setDanceUntilByAgentId((previous) =>
-      Object.fromEntries(
+    setDanceUntilByAgentId((previous) => {
+      const next = Object.fromEntries(
         Object.entries(previous).filter(([, until]) => until > now),
-      ),
-    );
+      );
+      const prevKeys = Object.keys(previous);
+      const nextKeys = Object.keys(next);
+      if (
+        prevKeys.length === nextKeys.length &&
+        nextKeys.every((key) => previous[key] === next[key])
+      ) {
+        return previous;
+      }
+      return next;
+    });
   }, [state.agents]);
   useEffect(() => {
     return () => {
@@ -2924,7 +2933,10 @@ export function OfficeScreen({
     enabled: runtimeSupportsSkills,
     agents: state.agents,
   });
-  const animationNowMs = Date.now();
+  // Refresh animation "now" on clockTick (2s) instead of every render.
+  // Date.now() as a render-time value rebuilt hold-map object identities on
+  // every paint and fed unstable props into office canvases/effects.
+  const animationNowMs = useMemo(() => Date.now(), [clockTick]);
   const officeAnimationState = useMemo(() => {
     const base = buildOfficeAnimationState({
       state: officeTriggerState,
@@ -4508,7 +4520,7 @@ export function OfficeScreen({
           aria-hidden
         >
           <p className="select-none font-mono text-xs tracking-[0.4em] text-amber-100/25">
-            HERMES3D
+            HERMES3D PILOT002 ISOLATION
           </p>
         </div>
         ) : officeRenderMode === "2d" ? (

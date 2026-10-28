@@ -2,16 +2,31 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const makeTempDir = (name: string) => fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
 
 describe("server studio upstream gateway settings", () => {
   const priorStateDir = process.env.HERMES_STATE_DIR;
+  const priorGatewayUrl = process.env.HERMES3D_GATEWAY_URL;
+  const priorGatewayToken = process.env.HERMES3D_GATEWAY_TOKEN;
+  const priorGatewayAdapter = process.env.HERMES3D_GATEWAY_ADAPTER_TYPE;
   let tempDir: string | null = null;
+
+  beforeEach(() => {
+    delete process.env.HERMES3D_GATEWAY_URL;
+    delete process.env.HERMES3D_GATEWAY_TOKEN;
+    delete process.env.HERMES3D_GATEWAY_ADAPTER_TYPE;
+  });
 
   afterEach(() => {
     process.env.HERMES_STATE_DIR = priorStateDir;
+    if (priorGatewayUrl === undefined) delete process.env.HERMES3D_GATEWAY_URL;
+    else process.env.HERMES3D_GATEWAY_URL = priorGatewayUrl;
+    if (priorGatewayToken === undefined) delete process.env.HERMES3D_GATEWAY_TOKEN;
+    else process.env.HERMES3D_GATEWAY_TOKEN = priorGatewayToken;
+    if (priorGatewayAdapter === undefined) delete process.env.HERMES3D_GATEWAY_ADAPTER_TYPE;
+    else process.env.HERMES3D_GATEWAY_ADAPTER_TYPE = priorGatewayAdapter;
     if (tempDir) {
       fs.rmSync(tempDir, { recursive: true, force: true });
       tempDir = null;
@@ -54,5 +69,29 @@ describe("server studio upstream gateway settings", () => {
     const settings = loadUpstreamGatewaySettings(process.env);
     expect(settings.url).toBe("ws://gateway.example:18789");
     expect(settings.token).toBe("tok-local");
+  });
+
+  it("HERMES3D_GATEWAY_URL overrides settings.json for upstream proxy", async () => {
+    tempDir = makeTempDir("studio-upstream-env-override");
+    process.env.HERMES_STATE_DIR = tempDir;
+    process.env.HERMES3D_GATEWAY_URL = "ws://127.0.0.1:18789";
+    process.env.HERMES3D_GATEWAY_ADAPTER_TYPE = "demo";
+    delete process.env.HERMES3D_GATEWAY_TOKEN;
+
+    fs.mkdirSync(path.join(tempDir, "hermes3d"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, "hermes3d", "settings.json"),
+      JSON.stringify(
+        { gateway: { url: "ws://old.example:1", token: "", adapterType: "hermes" } },
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    const { loadUpstreamGatewaySettings } = await import("../../server/studio-settings");
+    const settings = loadUpstreamGatewaySettings(process.env);
+    expect(settings.url).toBe("ws://127.0.0.1:18789");
+    expect(settings.adapterType).toBe("demo");
   });
 });

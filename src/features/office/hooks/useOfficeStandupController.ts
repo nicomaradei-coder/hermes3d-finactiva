@@ -413,17 +413,32 @@ export const useOfficeStandupController = (params: {
     [config?.schedule.autoOpenBoard]
   );
 
-  return {
-    config,
-    meeting,
-    loading,
-    saving,
-    error,
-    saveConfig,
-    updateManualEntry,
-    startMeeting,
-    reportArrivals,
-    openBoardByDefault,
-    refreshMeeting,
-  };
+  return useMemo(
+    () => ({
+      config,
+      meeting,
+      loading,
+      saving,
+      error,
+      saveConfig,
+      updateManualEntry,
+      startMeeting,
+      reportArrivals,
+      openBoardByDefault,
+      refreshMeeting,
+    }),
+    [
+      config,
+      meeting,
+      loading,
+      saving,
+      error,
+      saveConfig,
+      updateManualEntry,
+      startMeeting,
+      reportArrivals,
+      openBoardByDefault,
+      refreshMeeting,
+    ],
+  );
 };

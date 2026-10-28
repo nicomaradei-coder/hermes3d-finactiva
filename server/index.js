@@ -1,3 +1,34 @@
+const fs = require("node:fs");
+const path = require("node:path");
+
+/** Minimal .env loader for the custom Node server (Next only injects NEXT_PUBLIC_*). */
+const loadLocalEnvFile = () => {
+  try {
+    const envPath = path.join(__dirname, "..", ".env");
+    if (!fs.existsSync(envPath)) return;
+    for (const rawLine of fs.readFileSync(envPath, "utf8").split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+      const eq = line.indexOf("=");
+      if (eq <= 0) continue;
+      const key = line.slice(0, eq).trim();
+      let value = line.slice(eq + 1).trim();
+      if (
+        (value.startsWith("\"") && value.endsWith("\"")) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (key && process.env[key] === undefined) {
+        process.env[key] = value;
+      }
+    }
+  } catch {
+    // Ignore unreadable .env; process env remains authoritative.
+  }
+};
+loadLocalEnvFile();
+
 const http = require("node:http");
 const https = require("node:https");
 const next = require("next");

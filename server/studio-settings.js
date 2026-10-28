@@ -70,12 +70,24 @@ const loadUpstreamGatewaySettings = (env = process.env) => {
   const settingsPath = resolveStudioSettingsPath(env);
   const parsed = readJsonFile(settingsPath);
   const gateway = parsed && typeof parsed === "object" ? parsed.gateway : null;
-  const url = typeof gateway?.url === "string" ? gateway.url.trim() : "";
-  const token = typeof gateway?.token === "string" ? gateway.token.trim() : "";
-  const adapterType =
+  const fileUrl = typeof gateway?.url === "string" ? gateway.url.trim() : "";
+  const fileToken = typeof gateway?.token === "string" ? gateway.token.trim() : "";
+  const fileAdapterType =
     typeof gateway?.adapterType === "string" && gateway.adapterType.trim()
       ? gateway.adapterType.trim()
-      : "hermes";
+      : "";
+  // Explicit runtime env wins over persisted settings so local demo pilots
+  // can pin the upstream without relying only on UI/settings.json.
+  const envUrl = typeof env.HERMES3D_GATEWAY_URL === "string" ? env.HERMES3D_GATEWAY_URL.trim() : "";
+  const envToken =
+    typeof env.HERMES3D_GATEWAY_TOKEN === "string" ? env.HERMES3D_GATEWAY_TOKEN.trim() : "";
+  const envAdapterType =
+    typeof env.HERMES3D_GATEWAY_ADAPTER_TYPE === "string"
+      ? env.HERMES3D_GATEWAY_ADAPTER_TYPE.trim()
+      : "";
+  const url = envUrl || fileUrl;
+  const token = envToken || fileToken;
+  const adapterType = envAdapterType || fileAdapterType || "hermes";
   if (!token && adapterType === "hermes") {
     const defaults = readHermesGatewayDefaults(env);
     if (defaults) {

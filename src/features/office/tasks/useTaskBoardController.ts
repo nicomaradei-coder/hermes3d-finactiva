@@ -989,7 +989,8 @@ export const useTaskBoardController = ({
       type: "upsertMany",
       cards: [...playbookCards, ...standupCards],
     });
-  }, [cronJobs, standup]);
+    // Depend on config/meeting identities, not the whole controller object.
+  }, [cronJobs, standup.config, standup.meeting]);
 
   useEffect(() => {
     if (!hydratedRef.current) return;
