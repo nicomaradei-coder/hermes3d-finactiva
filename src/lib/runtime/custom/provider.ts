@@ -72,6 +72,11 @@ type SyntheticAgent = {
   id: string;
   name: string;
   role: string | null;
+  /** Hermes AgentStatus vocabulary only: idle | running | error */
+  status?: "idle" | "running" | "error" | null;
+  awaitingUserInput?: boolean;
+  latestPreview?: string | null;
+  sourceStatus?: string | null;
 };
 
 type SessionMessage = {
@@ -198,10 +203,62 @@ const buildChatFailureMessage = (
   return `Custom runtime chat failed (${statusCode}).`;
 };
 
+const normalizeHermesAgentStatus = (
+  value: unknown
+): "idle" | "running" | "error" | null => {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "idle" || normalized === "running" || normalized === "error") {
+    return normalized;
+  }
+  return null;
+};
+
+const buildAgentsFromExplicitList = (raw: unknown): SyntheticAgent[] => {
+  if (!Array.isArray(raw)) return [];
+  const agents: SyntheticAgent[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) continue;
+    const id = resolveOptionalString(entry.id);
+    if (!id) continue;
+    const name = resolveOptionalString(entry.name) ?? titleCase(id);
+    const role = resolveOptionalString(entry.role);
+    const status = normalizeHermesAgentStatus(entry.status);
+    const awaitingUserInput = entry.awaitingUserInput === true;
+    const latestPreview =
+      resolveOptionalString(entry.currentWork) ??
+      resolveOptionalString(entry.latestPreview) ??
+      resolveOptionalString(entry.lastActivity);
+    const sourceStatus = resolveOptionalString(entry.sourceStatus);
+    agents.push({
+      id,
+      name,
+      role,
+      status,
+      awaitingUserInput,
+      latestPreview,
+      sourceStatus,
+    });
+  }
+  return agents;
+};
+
 const buildSyntheticAgents = (
   state: CustomRuntimeStateResponse | null,
-  runtimeName: string
+  runtimeName: string,
+  registry: CustomRuntimeRegistryResponse | null = null
 ): SyntheticAgent[] => {
+  // Prefer explicit agent lists from custom runtimes (Finactiva adapter, etc.).
+  // Falls back to legacy `state.active` role→model synthesis for older runtimes.
+  const fromStateAgents = buildAgentsFromExplicitList(state?.agents);
+  if (fromStateAgents.length > 0) {
+    return fromStateAgents;
+  }
+  const fromRegistryAgents = buildAgentsFromExplicitList(registry?.agents);
+  if (fromRegistryAgents.length > 0) {
+    return fromRegistryAgents;
+  }
+
   const active = isRecord(state?.active) ? state.active : null;
   if (active) {
     const agents: SyntheticAgent[] = [];
@@ -304,6 +361,8 @@ export class CustomRuntimeProvider implements RuntimeProvider {
         return (await this.callAgentWait(params)) as T;
       case "exec.approvals.get":
         return ({ file: { agents: {} } } as T);
+      case "agents.files.get":
+        return ({ file: { missing: true, content: "" } } as T);
       case "config.get":
       case "config.patch":
       case "config.set":
@@ -379,7 +438,7 @@ export class CustomRuntimeProvider implements RuntimeProvider {
   private async callAgentsList() {
     const descriptor = await this.describeRuntime();
     const runtimeName = descriptor.metadata.runtimeName ?? this.metadata.runtimeName ?? "Custom Runtime";
-    const agents = buildSyntheticAgents(descriptor.state, runtimeName);
+    const agents = buildSyntheticAgents(descriptor.state, runtimeName, descriptor.registry);
     return {
       defaultId: agents[0]?.id ?? "main",
       mainKey: "main",
@@ -388,6 +447,13 @@ export class CustomRuntimeProvider implements RuntimeProvider {
         id: agent.id,
         name: agent.name,
         role: agent.role,
+        status: agent.status ?? null,
+        awaitingUserInput: Boolean(agent.awaitingUserInput),
+        latestPreview: agent.latestPreview ?? null,
+        sourceStatus: agent.sourceStatus ?? null,
+        identity: {
+          name: agent.name,
+        },
       })),
     };
   }

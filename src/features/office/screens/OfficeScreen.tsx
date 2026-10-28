@@ -1534,68 +1534,128 @@ export function OfficeScreen({
         const refreshedAgents = stateRef.current.agents;
         const debugCollector: OfficeDebugRow[] = [];
         const inferredByAgentId = new Map<string, boolean>();
-        await Promise.all(
-          refreshedAgents.map(async (agent) => {
-          if (connectionEpochAtStart !== connectionEpochRef.current) {
-            return;
-          }
+        const usesDirectRuntimeStatus =
+          selectedAdapterType === "custom" ||
+          selectedAdapterType === "local" ||
+          selectedAdapterType === "hermes3d";
+
+        if (usesDirectRuntimeStatus) {
+          // Custom HTTP runtimes report authoritative office status via agents.list.
+          // Do not overwrite with chat-session inference (which would force idle).
           try {
-            const inference = await inferRunningFromAgentSessions({
-              client: provider,
-              agentId: agent.agentId,
-            });
+            const listed = (await provider.call("agents.list", {})) as {
+              agents?: Array<{
+                id?: string;
+                status?: AgentState["status"] | null;
+                awaitingUserInput?: boolean;
+                latestPreview?: string | null;
+              }>;
+            };
             if (connectionEpochAtStart !== connectionEpochRef.current) {
               return;
             }
-            const inferredRunning = inference.inferredRunning;
-            inferredByAgentId.set(agent.agentId, inferredRunning);
-            if (inference.latestSessionUpdatedAtMs > 0) {
-              setLastSeenByAgentId((prev) => ({
-                ...prev,
-                [agent.agentId]: inference.latestSessionUpdatedAtMs,
-              }));
-            }
-            const nextStatus: AgentState["status"] = inferredRunning
-              ? "running"
-              : "idle";
-            if (agent.status !== nextStatus) {
-              dispatch({
-                type: "updateAgent",
-                agentId: agent.agentId,
-                patch: {
-                  status: nextStatus,
-                  runId: inferredRunning
-                    ? (agent.runId ?? `inferred-${agent.agentId}`)
-                    : null,
-                },
-              });
-            }
-            if (debugEnabled) {
-              debugCollector.push({
-                agentId: agent.agentId,
-                name: agent.name,
-                storeStatus: agent.status,
-                runId: agent.runId,
-                inferredRunning,
-                lastRole: inference.lastRole,
-                lastText: inference.lastText,
-                messageCount: inference.messageCount,
-                detectedSessionKey: inference.sessionKey,
-                inspectedSessions: inference.inspectedSessions.join(" | "),
-                inferenceSource: inference.inferenceSource,
-                at: new Date().toISOString(),
-              });
+            for (const entry of listed.agents ?? []) {
+              const agentId = typeof entry.id === "string" ? entry.id.trim() : "";
+              if (!agentId) continue;
+              const status =
+                entry.status === "idle" ||
+                entry.status === "running" ||
+                entry.status === "error"
+                  ? entry.status
+                  : null;
+              const patch: Partial<AgentState> = {};
+              if (status) {
+                patch.status = status;
+                patch.runId =
+                  status === "running" ? `runtime-${agentId}` : null;
+                inferredByAgentId.set(agentId, status === "running");
+              }
+              if (entry.awaitingUserInput === true) {
+                patch.awaitingUserInput = true;
+              } else if (entry.awaitingUserInput === false) {
+                patch.awaitingUserInput = false;
+              }
+              if (
+                typeof entry.latestPreview === "string" &&
+                entry.latestPreview.trim()
+              ) {
+                patch.latestPreview = entry.latestPreview.trim();
+              }
+              if (Object.keys(patch).length === 0) continue;
+              dispatch({ type: "updateAgent", agentId, patch });
             }
           } catch (error) {
             if (!isGatewayDisconnectLikeError(error)) {
               console.warn(
-                "Failed to infer agent run state from history.",
+                "Failed to sync custom runtime agent status.",
                 error,
               );
             }
           }
-          }),
-        );
+        } else {
+          await Promise.all(
+            refreshedAgents.map(async (agent) => {
+            if (connectionEpochAtStart !== connectionEpochRef.current) {
+              return;
+            }
+            try {
+              const inference = await inferRunningFromAgentSessions({
+                client: provider,
+                agentId: agent.agentId,
+              });
+              if (connectionEpochAtStart !== connectionEpochRef.current) {
+                return;
+              }
+              const inferredRunning = inference.inferredRunning;
+              inferredByAgentId.set(agent.agentId, inferredRunning);
+              if (inference.latestSessionUpdatedAtMs > 0) {
+                setLastSeenByAgentId((prev) => ({
+                  ...prev,
+                  [agent.agentId]: inference.latestSessionUpdatedAtMs,
+                }));
+              }
+              const nextStatus: AgentState["status"] = inferredRunning
+                ? "running"
+                : "idle";
+              if (agent.status !== nextStatus) {
+                dispatch({
+                  type: "updateAgent",
+                  agentId: agent.agentId,
+                  patch: {
+                    status: nextStatus,
+                    runId: inferredRunning
+                      ? (agent.runId ?? `inferred-${agent.agentId}`)
+                      : null,
+                  },
+                });
+              }
+              if (debugEnabled) {
+                debugCollector.push({
+                  agentId: agent.agentId,
+                  name: agent.name,
+                  storeStatus: agent.status,
+                  runId: agent.runId,
+                  inferredRunning,
+                  lastRole: inference.lastRole,
+                  lastText: inference.lastText,
+                  messageCount: inference.messageCount,
+                  detectedSessionKey: inference.sessionKey,
+                  inspectedSessions: inference.inspectedSessions.join(" | "),
+                  inferenceSource: inference.inferenceSource,
+                  at: new Date().toISOString(),
+                });
+              }
+            } catch (error) {
+              if (!isGatewayDisconnectLikeError(error)) {
+                console.warn(
+                  "Failed to infer agent run state from history.",
+                  error,
+                );
+              }
+            }
+            }),
+          );
+        }
         if (connectionEpochAtStart !== connectionEpochRef.current) {
           return;
         }
@@ -1621,6 +1681,8 @@ export function OfficeScreen({
     gatewayUrl,
     hydrateAgents,
     loadStudioSettings,
+    provider,
+    selectedAdapterType,
     setError,
     setLoading,
     status,
@@ -2719,6 +2781,28 @@ export function OfficeScreen({
       window.clearInterval(intervalId);
     };
   }, [agentsLoaded, loadAgents, status]);
+
+  // Custom/local/hermes3d HTTP runtimes: poll agents.list so Finactiva state.json
+  // changes appear without restarting Studio or the adapter (read-on-request).
+  useEffect(() => {
+    const usesDirectRuntimeStatus =
+      selectedAdapterType === "custom" ||
+      selectedAdapterType === "local" ||
+      selectedAdapterType === "hermes3d";
+    if (!usesDirectRuntimeStatus) return;
+    if (status !== "connected" || !agentsLoaded) return;
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void loadAgents({
+        minIntervalMs: 1_500,
+        settingsMaxAgeMs: 60_000,
+        silent: true,
+      });
+    }, 2_000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [agentsLoaded, loadAgents, selectedAdapterType, status]);
 
   useEffect(() => {
     if (status !== "connected" || !agentsLoaded) return;

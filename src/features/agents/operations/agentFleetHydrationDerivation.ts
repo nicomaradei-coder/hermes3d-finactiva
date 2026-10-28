@@ -24,6 +24,9 @@ type AgentsListResult = {
     id: string;
     name?: string;
     role?: string;
+    status?: "idle" | "running" | "error" | null;
+    awaitingUserInput?: boolean;
+    latestPreview?: string | null;
     identity?: {
       name?: string;
       theme?: string;
@@ -295,26 +298,59 @@ export const deriveHydrateAgentFleetResult = (
 
   let summaryPatches: SummarySnapshotPatch[] = [];
   let suggestedSelectedAgentId: string | null = null;
+
+  // Apply optional runtime-reported agent status from agents.list (custom runtimes).
+  const listedById = new Map(
+    input.agentsResult.agents.map((agent) => [agent.id, agent] as const)
+  );
+  for (const seed of seeds) {
+    const listed = listedById.get(seed.agentId);
+    if (!listed) continue;
+    const status =
+      listed.status === "idle" || listed.status === "running" || listed.status === "error"
+        ? listed.status
+        : null;
+    if (!status && listed.awaitingUserInput !== true && !listed.latestPreview) continue;
+    const patch: SummarySnapshotPatch["patch"] = {};
+    if (status) {
+      patch.status = status;
+      patch.runId = status === "running" ? `runtime-${seed.agentId}` : null;
+    }
+    if (listed.awaitingUserInput === true) {
+      patch.awaitingUserInput = true;
+    }
+    if (typeof listed.latestPreview === "string" && listed.latestPreview.trim()) {
+      patch.latestPreview = listed.latestPreview.trim();
+    }
+    summaryPatches.push({ agentId: seed.agentId, patch });
+  }
+
   if (input.statusSummary && input.previewResult) {
     const activeAgents: SummarySnapshotAgent[] = [];
     for (const seed of seeds) {
       const mainSession = input.mainSessionByAgentId.get(seed.agentId) ?? null;
       if (!mainSession) continue;
+      const listed = listedById.get(seed.agentId);
+      const listedStatus =
+        listed?.status === "idle" || listed?.status === "running" || listed?.status === "error"
+          ? listed.status
+          : "idle";
       activeAgents.push({
         agentId: seed.agentId,
         sessionKey: seed.sessionKey,
-        status: "idle",
+        status: listedStatus,
       });
     }
     const sessionKeys = Array.from(
       new Set(activeAgents.map((agent) => agent.sessionKey).filter((key) => key.trim().length > 0))
     ).slice(0, 64);
     if (sessionKeys.length > 0) {
-      summaryPatches = buildSummarySnapshotPatches({
+      const previewPatches = buildSummarySnapshotPatches({
         agents: activeAgents,
         statusSummary: input.statusSummary,
         previewResult: input.previewResult,
       });
+      summaryPatches = [...summaryPatches, ...previewPatches];
 
       const assistantAtByAgentId = new Map<string, number>();
       for (const entry of summaryPatches) {
