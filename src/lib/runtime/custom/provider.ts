@@ -364,6 +364,11 @@ export class CustomRuntimeProvider implements RuntimeProvider {
       case "agents.files.get":
         return ({ file: { missing: true, content: "" } } as T);
       case "config.get":
+        // Read-only custom runtimes have no editable gateway config.
+        return ({
+          hash: "custom-runtime",
+          config: { agents: { list: [], defaults: {} } },
+        } as T);
       case "config.patch":
       case "config.set":
         throw new Error(`Custom runtime does not support ${method}.`);
