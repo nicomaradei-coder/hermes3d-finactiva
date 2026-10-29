@@ -97,17 +97,19 @@ function ParkTree({
   position,
   scale,
   seed,
+  castShadow = true,
 }: {
   position: [number, number, number];
   scale: number;
   seed: number;
+  castShadow?: boolean;
 }) {
   const canopyColors = ["#4d7038", "#5a7f40", "#446331"];
   const lean = (hash1(seed * 7) - 0.5) * 0.14;
 
   return (
     <group position={position} scale={[scale, scale, scale]} rotation={[0, 0, lean]}>
-      <mesh position={[0, 0.8, 0]} castShadow>
+      <mesh position={[0, 0.8, 0]} castShadow={castShadow}>
         <cylinderGeometry args={[0.09, 0.14, 1.6, 8]} />
         <meshStandardMaterial color="#5d4a36" roughness={0.95} />
       </mesh>
@@ -122,7 +124,7 @@ function ParkTree({
               1.7 + index * 0.34,
               Math.sin(angle) * spread * 0.6,
             ]}
-            castShadow
+            castShadow={castShadow}
           >
             <sphereGeometry args={[0.85 - index * 0.16, 12, 10]} />
             <meshStandardMaterial
@@ -136,29 +138,30 @@ function ParkTree({
   );
 }
 
-const DUST_COUNT = 220;
-
 /**
  * Faint warm dust motes drifting through the office air — invisible from
- * afar, magical up close and in follow-cam.
+ * afar, magical up close and in follow-cam. Count 0 skips mount + useFrame.
  */
 function DustMotes({
   centerX,
   centerZ,
   extentX,
   extentZ,
+  count,
 }: {
   centerX: number;
   centerZ: number;
   extentX: number;
   extentZ: number;
+  count: number;
 }) {
   const pointsRef = useRef<THREE.Points>(null);
+  const dustCount = Math.max(0, Math.floor(count));
   const { positions, speeds, phases } = useMemo(() => {
-    const positionsArray = new Float32Array(DUST_COUNT * 3);
-    const speedsArray = new Float32Array(DUST_COUNT);
-    const phasesArray = new Float32Array(DUST_COUNT);
-    for (let index = 0; index < DUST_COUNT; index += 1) {
+    const positionsArray = new Float32Array(dustCount * 3);
+    const speedsArray = new Float32Array(dustCount);
+    const phasesArray = new Float32Array(dustCount);
+    for (let index = 0; index < dustCount; index += 1) {
       positionsArray[index * 3] = centerX + (hash1(index * 3 + 1) - 0.5) * extentX;
       positionsArray[index * 3 + 1] = 0.15 + hash1(index * 3 + 2) * 2.1;
       positionsArray[index * 3 + 2] = centerZ + (hash1(index * 3 + 3) - 0.5) * extentZ;
@@ -166,15 +169,16 @@ function DustMotes({
       phasesArray[index] = hash1(index * 7 + 5) * Math.PI * 2;
     }
     return { positions: positionsArray, speeds: speedsArray, phases: phasesArray };
-  }, [centerX, centerZ, extentX, extentZ]);
+  }, [centerX, centerZ, extentX, extentZ, dustCount]);
 
   useFrame(({ clock }) => {
+    if (dustCount <= 0) return;
     const points = pointsRef.current;
     if (!points) return;
     const attribute = points.geometry.getAttribute("position") as THREE.BufferAttribute;
     const array = attribute.array as Float32Array;
     const time = clock.elapsedTime;
-    for (let index = 0; index < DUST_COUNT; index += 1) {
+    for (let index = 0; index < dustCount; index += 1) {
       let y = array[index * 3 + 1] + speeds[index] * 0.016;
       if (y > 2.4) y = 0.15;
       array[index * 3 + 1] = y;
@@ -183,6 +187,8 @@ function DustMotes({
     }
     attribute.needsUpdate = true;
   });
+
+  if (dustCount <= 0) return null;
 
   return (
     <points ref={pointsRef}>
@@ -251,34 +257,52 @@ export function SceneAtmosphere({
     return list;
   }, [groundCenterX, groundCenterZ, groundWidth, groundHeight]);
 
+  const sunCastShadow = config.enableShadows;
+  const treeCastShadow = config.enableShadows && config.enableDistantShadows;
+  const receiveShadow = config.enableShadows;
+
   return (
     <>
       {/* Depth fog — pushes the far grounds into soft haze for scale. */}
       <fog attach="fog" args={["#c3cedb", 58, 165]} />
 
-      {/* Sky + image-based lighting from the bundled CC0 HDRI. */}
-      <Suspense fallback={null}>
-        <Environment
-          files={OFFICE_ENVIRONMENT_HDR}
-          background
-          backgroundBlurriness={0.04}
-          backgroundIntensity={1}
-          environmentIntensity={0.55}
-          backgroundRotation={[0, Math.PI * 0.85, 0]}
-          environmentRotation={[0, Math.PI * 0.85, 0]}
-        />
-      </Suspense>
+      {config.useHdriEnvironment ? (
+        /* Sky + image-based lighting from the bundled CC0 HDRI. */
+        <Suspense fallback={null}>
+          <Environment
+            files={OFFICE_ENVIRONMENT_HDR}
+            background
+            backgroundBlurriness={0.04}
+            backgroundIntensity={1}
+            environmentIntensity={0.55}
+            backgroundRotation={[0, Math.PI * 0.85, 0]}
+            environmentRotation={[0, Math.PI * 0.85, 0]}
+          />
+        </Suspense>
+      ) : (
+        /* ECO lightweight lighting — readable without HDRI IBL cost. */
+        <>
+          <color attach="background" args={["#b8c6d6"]} />
+          <ambientLight intensity={0.72} color="#f3f0ea" />
+        </>
+      )}
 
       {/* Sky/ground bounce fill. */}
-      <hemisphereLight args={["#cfe0f4", "#8a6b4d", 0.38]} />
+      <hemisphereLight
+        args={[
+          "#cfe0f4",
+          "#8a6b4d",
+          config.useHdriEnvironment ? 0.38 : 0.62,
+        ]}
+      />
 
-      {/* Warm key sun with tight, high-resolution soft shadows. */}
+      {/* Warm key sun; shadows only when the quality profile enables them. */}
       <directionalLight
         ref={sunRef}
         position={SUN_BASE_POSITION.toArray()}
-        intensity={3.3}
+        intensity={config.useHdriEnvironment ? 3.3 : 2.35}
         color="#ffedd2"
-        castShadow
+        castShadow={sunCastShadow}
         shadow-mapSize={[config.shadowMapSize, config.shadowMapSize]}
         shadow-bias={-0.00015}
         shadow-normalBias={0.025}
@@ -292,13 +316,17 @@ export function SceneAtmosphere({
       />
 
       {/* Cool sky fill from the opposite side — lifts shadowed faces. */}
-      <directionalLight position={[-14, 12, -10]} intensity={0.55} color="#a7c4ef" />
+      <directionalLight
+        position={[-14, 12, -10]}
+        intensity={config.useHdriEnvironment ? 0.55 : 0.75}
+        color="#a7c4ef"
+      />
 
       {/* Concrete plaza apron directly around the building. */}
       <mesh
         position={[groundCenterX, -0.045, groundCenterZ]}
         rotation={[-Math.PI / 2, 0, 0]}
-        receiveShadow
+        receiveShadow={receiveShadow}
       >
         <planeGeometry args={[groundWidth + 9, groundHeight + 9]} />
         <meshStandardMaterial
@@ -314,7 +342,11 @@ export function SceneAtmosphere({
 
       {/* Vast lawn so the office sits on land instead of floating in the
           sky — the fog fades it into the horizon. */}
-      <mesh position={[0, -0.06, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+      <mesh
+        position={[0, -0.06, 0]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        receiveShadow={receiveShadow}
+      >
         <circleGeometry args={[420, 48]} />
         <meshStandardMaterial color="#55654a" roughness={1} metalness={0} />
       </mesh>
@@ -326,18 +358,22 @@ export function SceneAtmosphere({
           position={tree.position}
           scale={tree.scale}
           seed={tree.seed}
+          castShadow={treeCastShadow}
         />
       ))}
 
-      {/* Drifting dust motes over the office interior. */}
-      <DustMotes
-        centerX={groundCenterX}
-        centerZ={groundCenterZ}
-        extentX={groundWidth * 0.9}
-        extentZ={groundHeight * 0.9}
-      />
+      {/* Drifting dust motes — unmounted in ECO (count=0) so useFrame never runs. */}
+      {config.dustMoteCount > 0 ? (
+        <DustMotes
+          centerX={groundCenterX}
+          centerZ={groundCenterZ}
+          extentX={groundWidth * 0.9}
+          extentZ={groundHeight * 0.9}
+          count={config.dustMoteCount}
+        />
+      ) : null}
 
-      <DaylightDrift sunRef={sunRef} />
+      {config.enableDaylightDrift ? <DaylightDrift sunRef={sunRef} /> : null}
     </>
   );
 }

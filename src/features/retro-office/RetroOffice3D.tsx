@@ -91,6 +91,7 @@ import {
   materializeDefaults,
   type OfficeLayoutPreset,
 } from "@/features/retro-office/core/furnitureDefaults";
+import { anchorWorkstationProps } from "@/features/retro-office/core/workstationAnchors";
 import {
   clampPointToZone,
   DISTRICT_CAMERA_TARGET,
@@ -119,7 +120,10 @@ import {
 import {
   astar,
   buildNavGrid,
+  DESK_SIT_ARRIVE_RADIUS,
+  DESK_SIT_LEAVE_RADIUS,
   getDeskLocations,
+  orientDeskChairsTowardDesks,
   getGymWorkoutLocations,
   getJanitorCleaningStops,
   getMeetingSeatLocations,
@@ -227,6 +231,11 @@ import {
   WallPictures as SceneWallPictures,
 } from "@/features/retro-office/scene/environment";
 import {
+  FinactivaBrandDecor,
+  FinactivaRoadmapPanel,
+  useFinactivaRoadmap,
+} from "@/features/retro-office/objects/FinactivaBrandDecor";
+import {
   CAMERA_PRESETS as CAMERA_PRESET_MAP,
   CameraAnimator as CameraPresetAnimator,
   computeOverviewCameraPosition,
@@ -245,6 +254,11 @@ import {
   saveGraphicsQuality,
   type GraphicsQuality,
 } from "@/features/retro-office/core/graphicsQuality";
+import { GraphicsQualityProvider } from "@/features/retro-office/core/GraphicsQualityContext";
+import {
+  isSitDebugEnabled,
+  SitDebugCamera,
+} from "@/features/retro-office/systems/SitDebugCamera";
 import { SceneErrorBoundary } from "@/features/retro-office/systems/SceneErrorBoundary";
 import {
   FloorRaycaster as SceneFloorRaycaster,
@@ -825,24 +839,42 @@ const ReadOnlyFurnitureClone = memo(function ReadOnlyFurnitureClone({
   );
 });
 
-function AdaptiveDprController({ maxDpr: maxDprCap = 1.5 }: { maxDpr?: number }) {
+function AdaptiveDprController({
+  maxDpr: maxDprCap = 1.5,
+  intervalFrames = 45,
+}: {
+  maxDpr?: number;
+  /** Frames between DPR adjustments (higher = less CPU churn on ECO). */
+  intervalFrames?: number;
+}) {
   const { gl, setDpr } = useThree();
-  const currentDprRef = useRef(1.25);
+  const currentDprRef = useRef(Math.min(1, maxDprCap));
   const frameCounterRef = useRef(0);
   const avgDeltaRef = useRef(1 / 60);
+  /** -1 lower, +1 raise, 0 idle — consecutive samples must agree before apply. */
+  const pendingDirRef = useRef(0);
+  const pendingCountRef = useRef(0);
+  const sampleEvery = Math.max(30, Math.floor(intervalFrames));
+  const confirmSamples = maxDprCap <= 1.05 ? 3 : 2;
 
   useEffect(() => {
     const initialDpr = Math.min(window.devicePixelRatio || 1, maxDprCap);
     currentDprRef.current = initialDpr;
+    pendingDirRef.current = 0;
+    pendingCountRef.current = 0;
     setDpr(initialDpr);
     const handleVisibilityChange = () => {
       if (document.visibilityState !== "visible") {
-        currentDprRef.current = 0.85;
-        setDpr(0.85);
+        currentDprRef.current = Math.min(0.85, maxDprCap);
+        pendingDirRef.current = 0;
+        pendingCountRef.current = 0;
+        setDpr(currentDprRef.current);
         return;
       }
       const restoredDpr = Math.min(window.devicePixelRatio || 1, maxDprCap);
       currentDprRef.current = restoredDpr;
+      pendingDirRef.current = 0;
+      pendingCountRef.current = 0;
       setDpr(restoredDpr);
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -855,18 +887,33 @@ function AdaptiveDprController({ maxDpr: maxDprCap = 1.5 }: { maxDpr?: number })
     if (document.visibilityState !== "visible") return;
     avgDeltaRef.current = avgDeltaRef.current * 0.92 + delta * 0.08;
     frameCounterRef.current += 1;
-    if (frameCounterRef.current < 45) return;
+    if (frameCounterRef.current < sampleEvery) return;
     frameCounterRef.current = 0;
 
     const maxDpr = Math.min(window.devicePixelRatio || 1, maxDprCap);
-    const minDpr = 0.85;
+    const minDpr = Math.min(0.85, maxDpr);
+    // Wider hysteresis band reduces micro-oscillation / setDpr thrash on notebooks.
+    let desiredDir = 0;
+    if (avgDeltaRef.current > 1 / 40) desiredDir = -1;
+    else if (avgDeltaRef.current < 1 / 58) desiredDir = 1;
+
+    if (desiredDir === 0 || desiredDir !== pendingDirRef.current) {
+      pendingDirRef.current = desiredDir;
+      pendingCountRef.current = desiredDir === 0 ? 0 : 1;
+      return;
+    }
+    pendingCountRef.current += 1;
+    if (pendingCountRef.current < confirmSamples) return;
+
     let nextDpr = currentDprRef.current;
-    if (avgDeltaRef.current > 1 / 42) {
+    if (desiredDir < 0) {
       nextDpr = Math.max(minDpr, currentDprRef.current - 0.1);
-    } else if (avgDeltaRef.current < 1 / 57) {
+    } else {
       nextDpr = Math.min(maxDpr, currentDprRef.current + 0.05);
     }
-    if (Math.abs(nextDpr - currentDprRef.current) < 0.025) return;
+    pendingDirRef.current = 0;
+    pendingCountRef.current = 0;
+    if (Math.abs(nextDpr - currentDprRef.current) < 0.04) return;
     currentDprRef.current = nextDpr;
     setDpr(Number(nextDpr.toFixed(2)));
     gl.info.reset();
@@ -886,7 +933,7 @@ function AdaptiveDprController({ maxDpr: maxDprCap = 1.5 }: { maxDpr?: number })
 // concrete targets, paths, and per-frame actor motion.
 function useAgentTick(
   agents: SceneActor[],
-  deskLocations: { x: number; y: number }[],
+  deskLocations: Array<{ x: number; y: number; facing?: number }>,
   assignedDeskIndexByAgentId: Record<string, number> = {},
   gymWorkoutLocations: {
     x: number;
@@ -1572,10 +1619,25 @@ function useAgentTick(
           ns.targetY = deskPos.y;
           if (targetChanged)
             ns.path = planPath(existing.x, existing.y, deskPos.x, deskPos.y);
-          ns.state =
-            Math.hypot(existing.x - deskPos.x, existing.y - deskPos.y) < 15
-              ? "sitting"
-              : "walking";
+          const distToSeat = Math.hypot(
+            existing.x - deskPos.x,
+            existing.y - deskPos.y,
+          );
+          const staySitting =
+            existing.state === "sitting" &&
+            distToSeat < DESK_SIT_LEAVE_RADIUS;
+          const atDesk =
+            staySitting || distToSeat < DESK_SIT_ARRIVE_RADIUS;
+          ns.state = atDesk ? "sitting" : "walking";
+          if (atDesk) {
+            ns.x = deskPos.x;
+            ns.y = deskPos.y;
+            ns.path = [];
+            // Visual only: face the desk once seated (does not change status).
+            if (typeof deskPos.facing === "number") {
+              ns.facing = deskPos.facing;
+            }
+          }
         } else if (effectiveStatus === "working") {
           ns.pingPongUntil = undefined;
           ns.pingPongTargetX = undefined;
@@ -1598,6 +1660,61 @@ function useAgentTick(
           ns.targetY = existing.y;
           ns.path = [];
           ns.state = "standing";
+        } else if (
+          deskPos &&
+          !conversationMembership &&
+          !explicitMeetingHold &&
+          !explicitGymHold &&
+          !explicitSmsBoothHold &&
+          !explicitPhoneBoothHold &&
+          !explicitQaHold &&
+          !explicitGithubHold &&
+          !existing.pingPongUntil &&
+          effectiveStatus !== "error"
+        ) {
+          // Visual home desk for assigned agents while idle. Sitting is a
+          // posture only — agent.status from the runtime is left unchanged.
+          ns.pingPongUntil = undefined;
+          ns.pingPongTargetX = undefined;
+          ns.pingPongTargetY = undefined;
+          ns.pingPongFacing = undefined;
+          ns.pingPongPartnerId = undefined;
+          ns.pingPongTableUid = undefined;
+          ns.pingPongSide = undefined;
+          ns.walkSpeed =
+            existing.pingPongPreviousWalkSpeed ?? existing.walkSpeed;
+          ns.pingPongPreviousWalkSpeed = undefined;
+          ns.interactionTarget = "desk";
+          ns.phoneBoothStage = undefined;
+          ns.serverRoomStage = undefined;
+          ns.gymStage = undefined;
+          ns.qaLabStage = undefined;
+          ns.qaLabStationType = undefined;
+          ns.workoutStyle = undefined;
+          const targetChanged =
+            existing.targetX !== deskPos.x || existing.targetY !== deskPos.y;
+          ns.targetX = deskPos.x;
+          ns.targetY = deskPos.y;
+          if (targetChanged)
+            ns.path = planPath(existing.x, existing.y, deskPos.x, deskPos.y);
+          const distToSeat = Math.hypot(
+            existing.x - deskPos.x,
+            existing.y - deskPos.y,
+          );
+          const staySitting =
+            existing.state === "sitting" &&
+            distToSeat < DESK_SIT_LEAVE_RADIUS;
+          const atDesk =
+            staySitting || distToSeat < DESK_SIT_ARRIVE_RADIUS;
+          ns.state = atDesk ? "sitting" : "walking";
+          if (atDesk) {
+            ns.x = deskPos.x;
+            ns.y = deskPos.y;
+            ns.path = [];
+            if (typeof deskPos.facing === "number") {
+              ns.facing = deskPos.facing;
+            }
+          }
         } else if (effectiveStatus === "error") {
           ns.pingPongUntil = undefined;
           ns.pingPongTargetX = undefined;
@@ -1935,9 +2052,11 @@ function useAgentTick(
   ]);
 
   // Tick called each frame — follows A* waypoints, no React state.
-  const tick = () => {
+  // deltaSeconds keeps walk speed wall-clock stable on low-FPS (ECO/SwiftShader).
+  const tick = (deltaSeconds = 1 / 60) => {
     const grid = getNavGrid();
     const now = Date.now();
+    const frameScale = Math.min(4, Math.max(0.2, deltaSeconds * 60));
     const furnitureItems = furnitureRef.current ?? [];
     const smsBoothItem =
       furnitureItems.find((item) => item.type === "sms_booth") ?? null;
@@ -2100,9 +2219,41 @@ function useAgentTick(
       }
       const baseSpeed = agent.walkSpeed ?? WALK_SPEED;
       const speed =
-        agent.status === "working" && agent.state !== "sitting"
+        ((agent.status === "working" || agent.interactionTarget === "desk") &&
+        agent.state !== "sitting"
           ? baseSpeed * WORKING_WALK_SPEED_MULTIPLIER
-          : baseSpeed;
+          : baseSpeed) * frameScale;
+      // Snap-sit once close enough to the assigned seat (even mid-path).
+      if (
+        agent.interactionTarget === "desk" &&
+        agent.state !== "sitting" &&
+        agent.targetX !== undefined &&
+        agent.targetY !== undefined
+      ) {
+        const distToSeat = Math.hypot(
+          agent.targetX - agent.x,
+          agent.targetY - agent.y,
+        );
+        // Already narrowed to non-sitting above; leave-radius hysteresis is
+        // applied when already seated (see sitting branch below).
+        if (distToSeat <= DESK_SIT_ARRIVE_RADIUS) {
+          const deskIdx = deskByAgentRef.current.get(agent.id);
+          const seatFacing =
+            typeof deskIdx === "number"
+              ? deskLocations[deskIdx]?.facing
+              : undefined;
+          return {
+            ...agent,
+            x: agent.targetX,
+            y: agent.targetY,
+            facing:
+              typeof seatFacing === "number" ? seatFacing : agent.facing,
+            state: "sitting" as const,
+            path: [],
+            frame: agent.frame + 1,
+          };
+        }
+      }
       // Move toward the first waypoint. An empty path means astar found no route —
       // the agent stays put instead of walking through walls toward the raw target.
       const path = agent.path ?? [];
@@ -2200,7 +2351,10 @@ function useAgentTick(
               agent.conversationSeatIndex ?? 0,
               agent.conversationSize ?? 2,
             );
-          } else if (agent.status === "working") {
+          } else if (
+            agent.status === "working" ||
+            agent.interactionTarget === "desk"
+          ) {
             if (
               agent.interactionTarget === "sms_booth" &&
               agent.smsBoothStage !== "typing"
@@ -2338,30 +2492,67 @@ function useAgentTick(
                 frame: agent.frame + 1,
               };
             }
-            ns =
-              agent.interactionTarget === "sms_booth"
-                ? "standing"
-                : agent.interactionTarget === "phone_booth"
+            const deskArrival =
+              agent.interactionTarget === "desk" ||
+              (agent.interactionTarget === undefined &&
+                agent.status === "working");
+            if (deskArrival) {
+              const seatX = agent.targetX ?? nx;
+              const seatY = agent.targetY ?? ny;
+              const distToSeat = Math.hypot(seatX - nx, seatY - ny);
+              if (distToSeat > DESK_SIT_ARRIVE_RADIUS) {
+                // Empty/failed path must not "arrive" mid-floor as sitting.
+                const planned = astar(nx, ny, seatX, seatY, grid);
+                return {
+                  ...agent,
+                  x: nx,
+                  y: ny,
+                  targetX: seatX,
+                  targetY: seatY,
+                  path:
+                    planned.length > 0
+                      ? planned
+                      : [{ x: seatX, y: seatY }],
+                  state: "walking" as const,
+                  frame: agent.frame + 1,
+                };
+              }
+              nx = seatX;
+              ny = seatY;
+              ns = "sitting";
+              npath = [];
+              const deskIdx = deskByAgentRef.current.get(agent.id);
+              const seatFacing =
+                typeof deskIdx === "number"
+                  ? deskLocations[deskIdx]?.facing
+                  : undefined;
+              if (typeof seatFacing === "number") nf = seatFacing;
+            } else {
+              ns =
+                agent.interactionTarget === "sms_booth"
                   ? "standing"
-                  : agent.interactionTarget === "server_room"
+                  : agent.interactionTarget === "phone_booth"
                     ? "standing"
-                    : agent.interactionTarget === "gym"
-                      ? "working_out"
-                      : agent.interactionTarget === "qa_lab"
-                        ? "standing"
-                        : "sitting";
-            if (agent.interactionTarget === "sms_booth") {
-              nf = agent.facing;
-            } else if (agent.interactionTarget === "phone_booth") {
-              nf = agent.facing;
-            } else if (agent.interactionTarget === "server_room") {
-              nf = SERVER_ROOM_TARGET.facing;
-            } else if (agent.interactionTarget === "gym") {
-              nf = agent.facing;
-            } else if (agent.interactionTarget === "qa_lab") {
-              nf = agent.facing;
-            } else if (agent.interactionTarget === "meeting_room") {
-              nf = agent.facing;
+                    : agent.interactionTarget === "server_room"
+                      ? "standing"
+                      : agent.interactionTarget === "gym"
+                        ? "working_out"
+                        : agent.interactionTarget === "qa_lab"
+                          ? "standing"
+                          : "sitting";
+              if (agent.interactionTarget === "sms_booth") {
+                nf = agent.facing;
+              } else if (agent.interactionTarget === "phone_booth") {
+                nf = agent.facing;
+              } else if (agent.interactionTarget === "server_room") {
+                nf = SERVER_ROOM_TARGET.facing;
+              } else if (agent.interactionTarget === "gym") {
+                nf = agent.facing;
+              } else if (agent.interactionTarget === "qa_lab") {
+                nf = agent.facing;
+              } else if (agent.interactionTarget === "meeting_room") {
+                nf = agent.facing;
+              }
             }
           } else if (agent.status === "error") {
             ns = "standing";
@@ -2485,6 +2676,56 @@ function useAgentTick(
     for (const agent of movedWithCollisions) {
       renderAgentLookup.set(agent.id, agent);
     }
+    // QA/debug snapshot — always cheap to refresh; consumers opt in via
+    // ?officeDebug=1 or by reading window.__hermesRenderSnapshot in tests.
+    if (typeof window !== "undefined" && movedWithCollisions.length > 0) {
+      const byState: Record<string, number> = {};
+      for (const agent of movedWithCollisions) {
+        byState[agent.state] = (byState[agent.state] ?? 0) + 1;
+      }
+      (
+        window as Window & {
+          __hermesRenderSnapshot?: {
+            at: number;
+            byState: Record<string, number>;
+            agents: Array<{
+              id: string;
+              state: string;
+              status: string;
+              interactionTarget?: string;
+              x: number;
+              y: number;
+              targetX?: number;
+              targetY?: number;
+              pathLen: number;
+              distToTarget?: number;
+            }>;
+          };
+        }
+      ).__hermesRenderSnapshot = {
+        at: now,
+        byState,
+        agents: movedWithCollisions.map((agent) => ({
+          id: agent.id,
+          state: agent.state,
+          status: agent.status,
+          interactionTarget: agent.interactionTarget,
+          x: Math.round(agent.x),
+          y: Math.round(agent.y),
+          targetX:
+            agent.targetX !== undefined ? Math.round(agent.targetX) : undefined,
+          targetY:
+            agent.targetY !== undefined ? Math.round(agent.targetY) : undefined,
+          pathLen: agent.path?.length ?? 0,
+          distToTarget:
+            agent.targetX !== undefined && agent.targetY !== undefined
+              ? Math.round(
+                  Math.hypot(agent.targetX - agent.x, agent.targetY - agent.y),
+                )
+              : undefined,
+        })),
+      };
+    }
   };
 
   return {
@@ -2525,16 +2766,21 @@ const buildInitialFurnitureLayout = (
   storageNamespace: string,
   layoutPreset: OfficeLayoutPreset,
 ): FurnitureItem[] =>
-  ensureOfficeKanbanBoard(
-    ensureOfficeJukebox(
-      ensureOfficeQaLab(
-        ensureOfficeGymRoom(
-          ensureOfficeServerRoom(
-            ensureOfficePhoneBooth(
-              ensureOfficeSmsBooth(
-                ensureOfficeAtm(
-                  ensureOfficePingPongTable(
-                    loadFurniture(storageNamespace) ?? materializeDefaults(layoutPreset),
+  anchorWorkstationProps(
+    orientDeskChairsTowardDesks(
+      ensureOfficeKanbanBoard(
+        ensureOfficeJukebox(
+          ensureOfficeQaLab(
+            ensureOfficeGymRoom(
+              ensureOfficeServerRoom(
+                ensureOfficePhoneBooth(
+                  ensureOfficeSmsBooth(
+                    ensureOfficeAtm(
+                      ensureOfficePingPongTable(
+                        loadFurniture(storageNamespace) ??
+                          materializeDefaults(layoutPreset),
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -2570,7 +2816,7 @@ export function RetroOffice3D({
   githubSkill = null,
   taskManagerEnabled = false,
   soundhermesEnabled = false,
-  officeTitle = "Luke Headquarters",
+  officeTitle = "FINACTIVA HQ",
   officeTitleLoaded = false,
   remoteOfficeEnabled = false,
   remoteOfficeSourceKind = "presence_endpoint",
@@ -2853,6 +3099,13 @@ export function RetroOffice3D({
   const [spaceDown, setSpaceDown] = useState(false);
   const [spaceDragging, setSpaceDragging] = useState(false);
   const [standupBoardOpen, setStandupBoardOpen] = useState(false);
+  const [finactivaRoadmapOpen, setFinactivaRoadmapOpen] = useState(false);
+  const {
+    snapshot: finactivaRoadmapSnapshot,
+    loading: finactivaRoadmapLoading,
+    error: finactivaRoadmapError,
+    refresh: refreshFinactivaRoadmap,
+  } = useFinactivaRoadmap();
   const [activeKanbanUid, setActiveKanbanUid] = useState<string | null>(null);
   const [agentRosterOpen, setAgentRosterOpen] = useState(false);
   const autoOpenedStandupIdRef = useRef<string | null>(null);
@@ -2883,6 +3136,17 @@ export function RetroOffice3D({
     setGhostPos(null);
     setWallDrawStart(null);
   }, [layoutPreset, storageNamespace]);
+
+  useEffect(() => {
+    const openRoadmap = () => {
+      setFinactivaRoadmapOpen(true);
+      refreshFinactivaRoadmap();
+    };
+    window.addEventListener("finactiva-roadmap-open", openRoadmap);
+    return () => window.removeEventListener("finactiva-roadmap-open", openRoadmap);
+    // Intentionally stable: refresh is memoized; avoid rebinding on snapshot churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // New Idea 3: speech bubble agent IDs. Holds at most the one agent currently
   // granted the floor — see the speech-turn queue below.
   const [speechAgentIds, setSpeechAgentIds] = useState<Set<string>>(new Set());
@@ -3300,13 +3564,30 @@ export function RetroOffice3D({
   const deskLocations = useMemo(() => getDeskLocations(furniture), [furniture]);
   const assignedDeskIndexByAgentId = useMemo(() => {
     const next: Record<string, number> = {};
+    const used = new Set<number>();
     deskItems.forEach((item, index) => {
       const agentId = deskAssignmentByDeskUid[item._uid];
       if (!agentId) return;
       next[agentId] = index;
+      used.add(index);
     });
+    // Visual-only fallback: unassigned agents still need a seat so "working"
+    // can walk → sit. Does not persist and does not change agent.status.
+    const freeIndexes = deskItems
+      .map((_, index) => index)
+      .filter((index) => !used.has(index));
+    let freeCursor = 0;
+    const sortedAgentIds = [...agents]
+      .map((agent) => agent.id)
+      .sort((left, right) => left.localeCompare(right));
+    for (const agentId of sortedAgentIds) {
+      if (next[agentId] !== undefined) continue;
+      if (freeCursor >= freeIndexes.length) break;
+      next[agentId] = freeIndexes[freeCursor]!;
+      freeCursor += 1;
+    }
     return next;
-  }, [deskAssignmentByDeskUid, deskItems]);
+  }, [agents, deskAssignmentByDeskUid, deskItems]);
   const janitorCleaningStops = useMemo(
     () => getJanitorCleaningStops(furniture),
     [furniture],
@@ -5474,7 +5755,11 @@ export function RetroOffice3D({
         .filter((item) => item.type === "desk_cubicle")
         .map((item) => item._uid),
     );
-    setFurniture(materializeDefaults(layoutPreset));
+    setFurniture(
+      anchorWorkstationProps(
+        orientDeskChairsTowardDesks(materializeDefaults(layoutPreset)),
+      ),
+    );
     setSelectedUid(null);
     setDrag({ kind: "idle" });
     setGhostPos(null);
@@ -5779,17 +6064,24 @@ export function RetroOffice3D({
         {!immersiveOverlayActive ? (
           <SceneErrorBoundary>
           <Canvas
-            key={canvasResetKey}
-            dpr={[0.85, graphicsQualityConfig.maxDpr]}
+            key={`${canvasResetKey}:${graphicsQuality}`}
+            dpr={[
+              Math.min(0.85, graphicsQualityConfig.maxDpr),
+              graphicsQualityConfig.maxDpr,
+            ]}
             camera={{
               position: CAM_POS,
               fov: SCENE_CAMERA_FOV,
               near: 0.3,
               far: 320,
             }}
-            shadows={{ type: THREE.PCFShadowMap }}
+            shadows={
+              graphicsQualityConfig.enableShadows
+                ? { type: THREE.PCFShadowMap }
+                : false
+            }
             gl={{
-              antialias: true,
+              antialias: graphicsQualityConfig.antialias,
               powerPreference: "high-performance",
               toneMapping: THREE.ACESFilmicToneMapping,
               toneMappingExposure: 1.0,
@@ -5800,15 +6092,24 @@ export function RetroOffice3D({
               if (drag.kind === "moving") setDrag({ kind: "idle" });
             }}
           >
+            <GraphicsQualityProvider value={graphicsQualityConfig}>
             {/* Ensure camera looks at the active office target after mount. */}
-            <CameraRig target={cameraTarget} />
-            <AdaptiveDprController maxDpr={graphicsQualityConfig.maxDpr} />
+            {!isSitDebugEnabled() ? <CameraRig target={cameraTarget} /> : null}
+            <SitDebugCamera enabled={isSitDebugEnabled()} orbitRef={orbitRef} />
+            <AdaptiveDprController
+              maxDpr={graphicsQualityConfig.maxDpr}
+              intervalFrames={graphicsQualityConfig.adaptiveDprIntervalFrames}
+            />
 
             {/* Orbit / pan / zoom controls — disabled while follow cam is active or while editing furniture. */}
             <OrbitControls
               ref={orbitRef}
               target={cameraTarget}
-              enabled={followAgentId === null && (!editMode || spaceDown)}
+              enabled={
+                !isSitDebugEnabled() &&
+                followAgentId === null &&
+                (!editMode || spaceDown)
+              }
               enableDamping
               dampingFactor={0.08}
               rotateSpeed={0.6}
@@ -5867,6 +6168,17 @@ export function RetroOffice3D({
 
             {/* Wall pictures — procedural, no async loading. */}
             <SceneWallPictures showRemoteOffice={remoteOfficeEnabled} />
+
+            {/* Finactiva Business wall sign + roadmap screen (official brand). */}
+            <Suspense fallback={null}>
+              <FinactivaBrandDecor
+                snapshot={finactivaRoadmapSnapshot}
+                onOpenRoadmap={() => {
+                  setFinactivaRoadmapOpen(true);
+                  refreshFinactivaRoadmap();
+                }}
+              />
+            </Suspense>
 
             {/* Furniture models — each loads its GLB asynchronously. */}
             <Suspense fallback={null}>
@@ -6424,10 +6736,20 @@ export function RetroOffice3D({
               onMove={handleFloorMove}
               onClick={handleFloorClick}
             />
+            </GraphicsQualityProvider>
           </Canvas>
           </SceneErrorBoundary>
         ) : null}
       </div>
+
+      <FinactivaRoadmapPanel
+        open={finactivaRoadmapOpen}
+        snapshot={finactivaRoadmapSnapshot}
+        loading={finactivaRoadmapLoading}
+        error={finactivaRoadmapError}
+        onClose={() => setFinactivaRoadmapOpen(false)}
+        onRefresh={refreshFinactivaRoadmap}
+      />
 
       {/* New Idea 2: Camera preset buttons — top left. */}
       {!readOnly && !immersiveOverlayActive ? (
@@ -6500,15 +6822,27 @@ export function RetroOffice3D({
         </div>
       ) : null}
 
-      {/* Title — top center overlay. */}
+      {/* Title — Finactiva HQ identity (official v2 navy / green). */}
       {!immersiveOverlayActive ? (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 pointer-events-none select-none z-10">
-          <div className="flex items-center gap-3">
-            <div className="h-px w-12 bg-gradient-to-r from-transparent to-amber-500/40" />
-            <span className="text-sm tracking-[0.3em] text-amber-300/80 font-bold uppercase">
+          <div
+            className="flex items-center gap-3 rounded-full border border-emerald-500/25 bg-[#0f172a]/92 px-3 py-1.5 shadow-lg backdrop-blur-sm"
+            data-testid="finactiva-hq-header"
+          >
+            <div className="h-px w-8 bg-gradient-to-r from-transparent to-emerald-400/50" />
+            {/* eslint-disable-next-line @next/next/no-img-element -- official brand asset from public/ */}
+            <img
+              src="/brand/finactiva-logo.png"
+              alt=""
+              width={22}
+              height={22}
+              className="h-[22px] w-[22px] rounded-md object-cover"
+              aria-hidden="true"
+            />
+            <span className="text-sm tracking-[0.28em] text-emerald-300/90 font-bold uppercase">
               {officeTitle}
             </span>
-            <div className="h-px w-12 bg-gradient-to-l from-transparent to-amber-500/40" />
+            <div className="h-px w-8 bg-gradient-to-l from-transparent to-emerald-400/50" />
           </div>
         </div>
       ) : null}
@@ -6529,7 +6863,7 @@ export function RetroOffice3D({
             .sort()
             .join("|")}
         >
-          <div className="flex items-center gap-2 rounded-full border border-amber-900/25 bg-[#1c1610]/92 px-2 py-2 shadow-lg backdrop-blur-sm">
+          <div className="flex items-center gap-2 rounded-full border border-emerald-500/20 bg-[#0f172a]/92 px-2 py-2 shadow-lg backdrop-blur-sm">
             <div className="flex items-center -space-x-1.5">
               {compactRosterAgents.map((agent) => {
                 const status = agentStatusLookup[agent.id];

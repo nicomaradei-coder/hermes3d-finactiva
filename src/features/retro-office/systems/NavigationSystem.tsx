@@ -71,6 +71,15 @@ export function applyAgentCollisionBumps({
           let ddy = moved[i].y - moved[j].y;
           const d = Math.hypot(ddx, ddy);
           const minDist = AGENT_RADIUS * 2;
+          // Seated desk workers are magnets for arrivals — do not treat them
+          // as bump sources that fling newcomers back to roam points.
+          if (
+            mj.state === "sitting" ||
+            mj.state === "working_out" ||
+            mj.state === "dancing"
+          ) {
+            continue;
+          }
           if (d < minDist) {
             if (d === 0) {
               ddx = Math.random() - 0.5;
@@ -88,6 +97,16 @@ export function applyAgentCollisionBumps({
       }
     }
     if (sx === 0 && sy === 0) continue;
+    // Desk-bound agents keep their seat target; only nudge apart.
+    if (moved[i].interactionTarget === "desk") {
+      moved[i] = {
+        ...moved[i],
+        x: moved[i].x + sx * 0.35,
+        y: moved[i].y + sy * 0.35,
+        collisionCooldownUntil: now + 250,
+      };
+      continue;
+    }
     const pushMag = Math.hypot(sx, sy);
     const norm = pushMag || 1;
     let bestDot = -Infinity;

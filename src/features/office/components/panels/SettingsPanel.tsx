@@ -129,7 +129,7 @@ export function SettingsPanel({
           maxLength={48}
           disabled={!officeTitleLoaded}
           onChange={(event) => onOfficeTitleChange(event.target.value)}
-          placeholder="Luke Headquarters"
+          placeholder="FINACTIVA HQ"
           className="mt-3 w-full rounded-md border border-cyan-500/10 bg-black/25 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-cyan-100 outline-none transition-colors placeholder:text-cyan-100/30 focus:border-cyan-400/30 disabled:cursor-not-allowed disabled:opacity-50"
         />
         <div className="mt-2 text-[10px] text-white/50">
@@ -480,7 +480,7 @@ export function SettingsPanel({
         <div className="mt-3 rounded-lg border border-cyan-500/10 bg-black/20 px-4 py-3">
           <div className="text-[11px] font-medium text-white">Graphics quality</div>
           <div className="mt-1 text-[10px] text-white/75">
-            Balance visual fidelity against performance in the 3D office.
+            ECO / BALANCED / HIGH profiles for the 3D office (notebook → fidelity).
           </div>
           <div className="mt-3 grid gap-2">
             {GRAPHICS_QUALITY_OPTIONS.map((option) => {

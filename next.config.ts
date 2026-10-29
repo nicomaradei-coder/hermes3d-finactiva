@@ -24,7 +24,8 @@ const securityHeaders = [
       // connect-src is intentionally broad: gateway URLs are user-configured
       // at runtime and cannot be enumerated at build time.
       // Restrict further when a fixed deployment target is known.
-      "connect-src 'self' ws: wss: http: https:",
+      // blob: required for GLTFLoader embedded-texture fetches (Cycle 5 Quaternius GLB).
+      "connect-src 'self' blob: ws: wss: http: https:",
       "media-src 'self' blob: data: http: https:",
       "worker-src 'self' blob:",
       "object-src 'none'",

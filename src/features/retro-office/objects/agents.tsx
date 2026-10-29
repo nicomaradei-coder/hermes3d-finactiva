@@ -7,12 +7,21 @@ import {
   AGENT_SCALE,
   WALK_ANIM_SPEED,
 } from "@/features/retro-office/core/constants";
+import { useObjectShadowsEnabled } from "@/features/retro-office/core/GraphicsQualityContext";
 import { toWorld } from "@/features/retro-office/core/geometry";
+import { ISO_SEATED_ROOT_Y } from "@/features/retro-office/core/workstationSeats";
 import type {
   JanitorActor,
   RenderAgent,
 } from "@/features/retro-office/core/types";
+import { SeatedAgentMesh } from "@/features/retro-office/objects/SeatedAgentMesh";
 import { AgentModelProps } from "@/features/retro-office/objects/types";
+
+/** Standing head center (local) → seated neck top so the face stays on the torso. */
+const STANDING_HEAD_CENTER_Y = 0.47;
+/** SeatedAgentMesh neck top (~0.271) + half head height (0.08). */
+const SEATED_HEAD_CENTER_Y = 0.35;
+const SEATED_HEAD_OFFSET_Y = SEATED_HEAD_CENTER_Y - STANDING_HEAD_CENTER_Y;
 
 const MAX_NAMEPLATE_TEXT_LENGTH = 10;
 const MAX_SUBTITLE_TEXT_LENGTH = 20;
@@ -95,6 +104,12 @@ export const AgentModel = memo(function AgentModel({
   const rightArmRef = useRef<THREE.Group>(null);
   const leftLegRef = useRef<THREE.Group>(null);
   const rightLegRef = useRef<THREE.Group>(null);
+  /** Dedicated iso seated body (pelvis→torso→arms). Hidden while standing/walking. */
+  const seatedMeshRef = useRef<THREE.Group>(null);
+  /** Standing torso + clothing extras — crossfades out against SeatedAgentMesh. */
+  const standingTorsoRef = useRef<THREE.Group>(null);
+  /** Head / hair / face — lerps down onto the seated neck stub. */
+  const headGroupRef = useRef<THREE.Group>(null);
   const statusDotMatRef = useRef<THREE.MeshBasicMaterial>(null);
   const pulseRingRef = useRef<THREE.Mesh>(null);
   const pulseRingMatRef = useRef<THREE.MeshBasicMaterial>(null);
@@ -118,28 +133,56 @@ export const AgentModel = memo(function AgentModel({
   const awayBubbleRef = useRef<THREE.Group>(null);
   const bodyMatRef = useRef<THREE.MeshStandardMaterial>(null);
   const pos = useRef(new THREE.Vector3(0, 0, 0));
+  /** 0 = standing pose, 1 = seated pose — lerped to avoid sit/stand pops. */
+  const sitBlendRef = useRef(0);
+  const wasAwayRef = useRef(false);
   const resolvedAppearance = useMemo(
     () => appearance ?? createDefaultAgentAvatarProfile(agentId),
     [agentId, appearance],
   );
+  const objectShadows = useObjectShadowsEnabled();
 
-  useFrame(() => {
+  useFrame((_, delta) => {
     const agent =
       agentLookupRef?.current?.get(agentId) ??
       agentsRef.current?.find((candidate) => candidate.id === agentId);
     if (!agent || !groupRef.current) return;
 
+    const isWorkout = agent.state === "working_out";
+    const isDancing = agent.state === "dancing";
+    const isSitting = agent.state === "sitting";
+    const sitTarget = isSitting ? 1 : 0;
+    const sitBlendRate = 1 - Math.exp(-8 * Math.max(0.001, delta));
+    sitBlendRef.current += (sitTarget - sitBlendRef.current) * sitBlendRate;
+    if (Math.abs(sitBlendRef.current - sitTarget) < 0.002) {
+      sitBlendRef.current = sitTarget;
+    }
+    const sitBlend = sitBlendRef.current;
+
     const [wx, , wz] = toWorld(agent.x, agent.y);
+    // Iso-seated: stay on the chair-derived canvas seat. Forward nudges drove
+    // thighs into the desktop; aisle nudges drove hips into the backrest.
     pos.current.set(wx, 0, wz);
-    groupRef.current.position.lerp(pos.current, 0.15);
+    // Delta-time position catch-up — frame-constant lerp looked frozen on ECO.
+    const posAlpha =
+      1 - Math.exp(-(isSitting ? 18 : 14) * Math.max(0.001, delta));
+    groupRef.current.position.x = THREE.MathUtils.lerp(
+      groupRef.current.position.x,
+      pos.current.x,
+      posAlpha,
+    );
+    groupRef.current.position.z = THREE.MathUtils.lerp(
+      groupRef.current.position.z,
+      pos.current.z,
+      posAlpha,
+    );
 
     const targetY = agent.facing;
     let rotDelta = targetY - groupRef.current.rotation.y;
     while (rotDelta > Math.PI) rotDelta -= Math.PI * 2;
     while (rotDelta < -Math.PI) rotDelta += Math.PI * 2;
-    groupRef.current.rotation.y += rotDelta * 0.12;
-    const isWorkout = agent.state === "working_out";
-    const isDancing = agent.state === "dancing";
+    const rotAlpha = 1 - Math.exp(-12 * Math.max(0.001, delta));
+    groupRef.current.rotation.y += rotDelta * rotAlpha;
     const isJanitor = "role" in agent && agent.role === "janitor";
     const janitorTool = isJanitor
       ? (agent as RenderAgent & JanitorActor).janitorTool
@@ -154,26 +197,27 @@ export const AgentModel = memo(function AgentModel({
       agent.frame * 0.18 + (agent.phaseOffset ?? 0) + Math.PI / 2,
     );
     groupRef.current.rotation.z = 0;
-    groupRef.current.rotation.x =
-      agent.state === "sitting"
-        ? -0.15
-        : isDancing
-          ? Math.sin(agent.frame * 0.18 + (agent.phaseOffset ?? 0)) * 0.06
-          : isWorkout
-            ? workoutStyle === "bike"
-              ? 0.18
-              : workoutStyle === "row"
-                ? -0.12 + Math.max(0, workoutPhase) * 0.08
-                : workoutStyle === "stretch"
-                  ? -0.08
-                  : workoutStyle === "run"
-                    ? 0.08
-                    : workoutStyle === "box"
-                      ? 0.04
-                      : 0.02
-            : agent.pingPongUntil
-              ? 0.08
-              : 0;
+    const standingLean = isDancing
+      ? Math.sin(agent.frame * 0.18 + (agent.phaseOffset ?? 0)) * 0.06
+      : isWorkout
+        ? workoutStyle === "bike"
+          ? 0.18
+          : workoutStyle === "row"
+            ? -0.12 + Math.max(0, workoutPhase) * 0.08
+            : workoutStyle === "stretch"
+              ? -0.08
+              : workoutStyle === "run"
+                ? 0.08
+                : workoutStyle === "box"
+                  ? 0.04
+                  : 0.02
+        : agent.pingPongUntil
+          ? 0.08
+          : 0;
+    // SeatedAgentMesh is authored upright; keep lean only while standing.
+    groupRef.current.rotation.x = standingLean * (1 - sitBlend);
+    // Keep AGENT_SCALE — seated silhouette is authored at the same local units.
+    groupRef.current.scale.set(AGENT_SCALE, AGENT_SCALE, AGENT_SCALE);
     const bounce =
       agent.state === "walking"
         ? Math.sin(frameValue * WALK_ANIM_SPEED) * 0.04
@@ -189,10 +233,15 @@ export const AgentModel = memo(function AgentModel({
                 : 0.02 + Math.abs(workoutPhase) * 0.04
             : 0;
     const breathe =
-      agent.state === "standing" || isWorkout || agent.pingPongUntil
-        ? Math.sin(frameValue * 0.03) * 0.01
+      agent.state === "standing" ||
+      isSitting ||
+      isWorkout ||
+      agent.pingPongUntil
+        ? Math.sin(frameValue * 0.03) * (isSitting ? 0.004 : 0.01)
         : 0;
-    groupRef.current.position.y = bounce + breathe;
+    // Root Y from workstationSeats: pelvis contact on the chair cushion.
+    groupRef.current.position.y =
+      bounce * (1 - sitBlend) + breathe + ISO_SEATED_ROOT_Y * sitBlend;
 
     if (leftArmRef.current) {
       leftArmRef.current.rotation.x = 0;
@@ -248,9 +297,10 @@ export const AgentModel = memo(function AgentModel({
       } else if (agent.pingPongUntil) {
         leftArmRef.current.rotation.x =
           0.2 + Math.sin(agent.frame * 0.08) * 0.28;
-      } else if (agent.state === "sitting") {
-        leftArmRef.current.rotation.x = 0.3;
       }
+      // Standing arms crossfade out; SeatedAgentMesh owns typing arms.
+      leftArmRef.current.scale.setScalar(Math.max(0.001, 1 - sitBlend));
+      leftArmRef.current.visible = sitBlend < 0.95;
     }
     if (rightArmRef.current) {
       rightArmRef.current.rotation.x = 0;
@@ -307,53 +357,77 @@ export const AgentModel = memo(function AgentModel({
       } else if (agent.pingPongUntil) {
         rightArmRef.current.rotation.x =
           0.08 - Math.sin(agent.frame * 0.08) * 0.16;
-      } else if (agent.state === "sitting") {
-        rightArmRef.current.rotation.x = 0.3;
       }
+      rightArmRef.current.scale.setScalar(Math.max(0.001, 1 - sitBlend));
+      rightArmRef.current.visible = sitBlend < 0.95;
     }
+    const standingLeftLeg =
+      agent.state === "walking"
+        ? walkPhase * 0.35
+        : isDancing
+          ? Math.sin(agent.frame * 0.22 + (agent.phaseOffset ?? 0)) * 0.35
+          : isWorkout
+            ? workoutStyle === "run"
+              ? workoutPhase * 0.7
+              : workoutStyle === "bike"
+                ? workoutPhase * 0.82
+                : workoutStyle === "row"
+                  ? 0.14 + Math.max(0, workoutPhase) * 0.42
+                  : workoutStyle === "stretch"
+                    ? -0.2 + Math.abs(workoutPhase) * 0.08
+                    : workoutStyle === "box"
+                      ? 0.06 + workoutPhase * 0.14
+                      : workoutPhase * 0.18
+            : 0;
+    const standingRightLeg =
+      agent.state === "walking"
+        ? -walkPhase * 0.35
+        : isDancing
+          ? -Math.sin(agent.frame * 0.22 + (agent.phaseOffset ?? 0)) * 0.35
+          : isWorkout
+            ? workoutStyle === "run"
+              ? -workoutPhase * 0.7
+              : workoutStyle === "bike"
+                ? -workoutPhase * 0.82
+                : workoutStyle === "row"
+                  ? 0.14 + Math.max(0, -workoutPhase) * 0.42
+                  : workoutStyle === "stretch"
+                    ? -0.12 + Math.abs(workoutPhase) * 0.08
+                    : workoutStyle === "box"
+                      ? 0.06 - workoutPhase * 0.14
+                      : -workoutPhase * 0.18
+            : 0;
+    // Standing legs / torso fade out; dedicated SeatedAgentMesh fades in.
     if (leftLegRef.current) {
-      leftLegRef.current.rotation.x =
-        agent.state === "walking"
-          ? walkPhase * 0.35
-          : isDancing
-            ? Math.sin(agent.frame * 0.22 + (agent.phaseOffset ?? 0)) * 0.35
-            : isWorkout
-              ? workoutStyle === "run"
-                ? workoutPhase * 0.7
-                : workoutStyle === "bike"
-                  ? workoutPhase * 0.82
-                  : workoutStyle === "row"
-                    ? 0.14 + Math.max(0, workoutPhase) * 0.42
-                    : workoutStyle === "stretch"
-                      ? -0.2 + Math.abs(workoutPhase) * 0.08
-                      : workoutStyle === "box"
-                        ? 0.06 + workoutPhase * 0.14
-                        : workoutPhase * 0.18
-              : 0;
+      leftLegRef.current.rotation.x = standingLeftLeg * (1 - sitBlend);
+      leftLegRef.current.rotation.z = 0;
+      leftLegRef.current.position.set(0.045, 0.1, 0);
+      leftLegRef.current.scale.setScalar(Math.max(0.001, 1 - sitBlend));
+      leftLegRef.current.visible = sitBlend < 0.95;
     }
     if (rightLegRef.current) {
-      rightLegRef.current.rotation.x =
-        agent.state === "walking"
-          ? -walkPhase * 0.35
-          : isDancing
-            ? -Math.sin(agent.frame * 0.22 + (agent.phaseOffset ?? 0)) * 0.35
-            : isWorkout
-              ? workoutStyle === "run"
-                ? -workoutPhase * 0.7
-                : workoutStyle === "bike"
-                  ? -workoutPhase * 0.82
-                  : workoutStyle === "row"
-                    ? 0.14 + Math.max(0, -workoutPhase) * 0.42
-                    : workoutStyle === "stretch"
-                      ? -0.12 + Math.abs(workoutPhase) * 0.08
-                      : workoutStyle === "box"
-                        ? 0.06 - workoutPhase * 0.14
-                        : -workoutPhase * 0.18
-              : 0;
+      rightLegRef.current.rotation.x = standingRightLeg * (1 - sitBlend);
+      rightLegRef.current.rotation.z = 0;
+      rightLegRef.current.position.set(-0.045, 0.1, 0);
+      rightLegRef.current.scale.setScalar(Math.max(0.001, 1 - sitBlend));
+      rightLegRef.current.visible = sitBlend < 0.95;
+    }
+    if (standingTorsoRef.current) {
+      standingTorsoRef.current.scale.setScalar(Math.max(0.001, 1 - sitBlend));
+      standingTorsoRef.current.visible = sitBlend < 0.95;
+    }
+    if (seatedMeshRef.current) {
+      seatedMeshRef.current.visible = sitBlend > 0.05;
+      seatedMeshRef.current.scale.setScalar(Math.max(0.001, sitBlend));
+    }
+    if (headGroupRef.current) {
+      headGroupRef.current.position.y = SEATED_HEAD_OFFSET_Y * sitBlend;
+      headGroupRef.current.position.z = -0.01 * sitBlend;
     }
 
     const working =
-      agent.state === "sitting" ||
+      isSitting ||
+      sitBlend > 0.5 ||
       isWorkout ||
       isDancing ||
       agent.status === "working";
@@ -383,7 +457,9 @@ export const AgentModel = memo(function AgentModel({
 
     if (awayBubbleRef.current) awayBubbleRef.current.visible = isAway;
     if (bodyMatRef.current) bodyMatRef.current.opacity = isAway ? 0.45 : 1;
-    if (groupRef.current) {
+    // Traverse only when away-state flips — was a per-frame cost on every agent.
+    if (groupRef.current && wasAwayRef.current !== isAway) {
+      wasAwayRef.current = isAway;
       groupRef.current.traverse((child) => {
         // Physical materials (glasses lenses) keep their fixed transparency.
         if (
@@ -746,33 +822,34 @@ export const AgentModel = memo(function AgentModel({
         <circleGeometry args={[0.12, 12]} />
         <meshBasicMaterial color="#000" transparent opacity={0.2} />
       </mesh>
+      {/* Standing legs — fade out while seated. */}
       <group ref={rightLegRef} position={[-0.045, 0.1, 0]}>
         {bottomStyle === "shorts" ? (
           <>
-            <mesh position={[0, 0.03, 0]} castShadow>
+            <mesh position={[0, -0.04, 0]} castShadow={objectShadows}>
               <boxGeometry args={[0.07, 0.08, 0.08]} />
               <meshStandardMaterial color={trouserColor} roughness={0.75} />
             </mesh>
-            <mesh position={[0, -0.045, 0]} castShadow>
+            <mesh position={[0, -0.115, 0]} castShadow={objectShadows}>
               <boxGeometry args={[0.05, 0.06, 0.05]} />
               <meshStandardMaterial color={skin} roughness={0.55} />
             </mesh>
           </>
         ) : (
           <>
-            <mesh castShadow>
+            <mesh position={[0, -0.07, 0]} castShadow={objectShadows}>
               <boxGeometry args={[0.07, 0.14, 0.08]} />
               <meshStandardMaterial color={trouserColor} roughness={0.75} />
             </mesh>
             {bottomStyle === "cuffed" ? (
-              <mesh position={[0, -0.05, 0]}>
+              <mesh position={[0, -0.12, 0]}>
                 <boxGeometry args={[0.074, 0.022, 0.084]} />
                 <meshStandardMaterial color="#d1d5db" roughness={0.75} />
               </mesh>
             ) : null}
           </>
         )}
-        <mesh position={[0, -0.09, 0]} castShadow>
+        <mesh position={[0, -0.16, 0]} castShadow={objectShadows}>
           <boxGeometry args={[0.07, 0.05, 0.12]} />
           <meshStandardMaterial color={shoeColor} roughness={0.75} />
         </mesh>
@@ -780,80 +857,98 @@ export const AgentModel = memo(function AgentModel({
       <group ref={leftLegRef} position={[0.045, 0.1, 0]}>
         {bottomStyle === "shorts" ? (
           <>
-            <mesh position={[0, 0.03, 0]} castShadow>
+            <mesh position={[0, -0.04, 0]} castShadow={objectShadows}>
               <boxGeometry args={[0.07, 0.08, 0.08]} />
               <meshStandardMaterial color={trouserColor} roughness={0.75} />
             </mesh>
-            <mesh position={[0, -0.045, 0]} castShadow>
+            <mesh position={[0, -0.115, 0]} castShadow={objectShadows}>
               <boxGeometry args={[0.05, 0.06, 0.05]} />
               <meshStandardMaterial color={skin} roughness={0.55} />
             </mesh>
           </>
         ) : (
           <>
-            <mesh castShadow>
+            <mesh position={[0, -0.07, 0]} castShadow={objectShadows}>
               <boxGeometry args={[0.07, 0.14, 0.08]} />
               <meshStandardMaterial color={trouserColor} roughness={0.75} />
             </mesh>
             {bottomStyle === "cuffed" ? (
-              <mesh position={[0, -0.05, 0]}>
+              <mesh position={[0, -0.12, 0]}>
                 <boxGeometry args={[0.074, 0.022, 0.084]} />
                 <meshStandardMaterial color="#d1d5db" roughness={0.75} />
               </mesh>
             ) : null}
           </>
         )}
-        <mesh position={[0, -0.09, 0]} castShadow>
+        <mesh position={[0, -0.16, 0]} castShadow={objectShadows}>
           <boxGeometry args={[0.07, 0.05, 0.12]} />
           <meshStandardMaterial color={shoeColor} roughness={0.75} />
         </mesh>
       </group>
-      {showBackpack ? (
-        <group position={[0, 0.28, -0.08]}>
-          <mesh castShadow>
-            <boxGeometry args={[0.15, 0.18, 0.06]} />
-            <meshStandardMaterial color={accessoryColor} roughness={0.75} />
-          </mesh>
-          <mesh position={[-0.06, 0.02, 0.02]}>
-            <boxGeometry args={[0.018, 0.16, 0.018]} />
-            <meshStandardMaterial color="#cbd5e1" roughness={0.75} />
-          </mesh>
-          <mesh position={[0.06, 0.02, 0.02]}>
-            <boxGeometry args={[0.018, 0.16, 0.018]} />
-            <meshStandardMaterial color="#cbd5e1" roughness={0.75} />
-          </mesh>
-        </group>
-      ) : null}
-      <mesh position={[0, 0.28, 0]} castShadow receiveShadow>
-        <boxGeometry args={[0.18, 0.2, 0.1]} />
-        <meshStandardMaterial ref={bodyMatRef} color={topColor} roughness={0.75} />
-      </mesh>
-      {topStyle === "hoodie" ? (
-        <>
-          <mesh position={[0, 0.35, -0.045]} castShadow>
-            <boxGeometry args={[0.17, 0.1, 0.03]} />
-            <meshStandardMaterial color={topColor} roughness={0.75} />
-          </mesh>
-          <mesh position={[0, 0.22, 0.056]}>
-            <boxGeometry args={[0.11, 0.03, 0.012]} />
-            <meshStandardMaterial color={cuffColor} roughness={0.75} />
-          </mesh>
-        </>
-      ) : null}
-      {topStyle === "jacket" ? (
-        <>
-          <mesh position={[0, 0.28, 0.056]}>
-            <boxGeometry args={[0.182, 0.21, 0.012]} />
-            <meshStandardMaterial color={topAccentColor} roughness={0.75} />
-          </mesh>
-          <mesh position={[0, 0.28, 0.063]}>
-            <boxGeometry args={[0.034, 0.2, 0.01]} />
-            <meshStandardMaterial color="#f8fafc" roughness={0.75} />
-          </mesh>
-        </>
-      ) : null}
+      {/* Dedicated iso seated body — same variant for all eight desks. */}
+      <group ref={seatedMeshRef} visible={false}>
+        <SeatedAgentMesh
+          skin={skin}
+          topColor={topColor}
+          sleeveColor={sleeveColor}
+          trouserColor={trouserColor}
+          shoeColor={shoeColor}
+          bottomStyle={bottomStyle}
+          castShadow={objectShadows}
+        />
+      </group>
+      <group ref={standingTorsoRef}>
+        {showBackpack ? (
+          <group position={[0, 0.28, -0.08]}>
+            <mesh castShadow={objectShadows}>
+              <boxGeometry args={[0.15, 0.18, 0.06]} />
+              <meshStandardMaterial color={accessoryColor} roughness={0.75} />
+            </mesh>
+            <mesh position={[-0.06, 0.02, 0.02]}>
+              <boxGeometry args={[0.018, 0.16, 0.018]} />
+              <meshStandardMaterial color="#cbd5e1" roughness={0.75} />
+            </mesh>
+            <mesh position={[0.06, 0.02, 0.02]}>
+              <boxGeometry args={[0.018, 0.16, 0.018]} />
+              <meshStandardMaterial color="#cbd5e1" roughness={0.75} />
+            </mesh>
+          </group>
+        ) : null}
+        <mesh position={[0, 0.28, 0]} castShadow={objectShadows} receiveShadow={objectShadows}>
+          <boxGeometry args={[0.18, 0.2, 0.1]} />
+          <meshStandardMaterial ref={bodyMatRef} color={topColor} roughness={0.75} />
+        </mesh>
+        {topStyle === "hoodie" ? (
+          <>
+            <mesh position={[0, 0.35, -0.045]} castShadow={objectShadows}>
+              <boxGeometry args={[0.17, 0.1, 0.03]} />
+              <meshStandardMaterial color={topColor} roughness={0.75} />
+            </mesh>
+            <mesh position={[0, 0.22, 0.056]}>
+              <boxGeometry args={[0.11, 0.03, 0.012]} />
+              <meshStandardMaterial color={cuffColor} roughness={0.75} />
+            </mesh>
+          </>
+        ) : null}
+        {topStyle === "jacket" ? (
+          <>
+            <mesh position={[0, 0.28, 0.056]}>
+              <boxGeometry args={[0.182, 0.21, 0.012]} />
+              <meshStandardMaterial color={topAccentColor} roughness={0.75} />
+            </mesh>
+            <mesh position={[0, 0.28, 0.063]}>
+              <boxGeometry args={[0.034, 0.2, 0.01]} />
+              <meshStandardMaterial color="#f8fafc" roughness={0.75} />
+            </mesh>
+          </>
+        ) : null}
+        <mesh position={[0, 0.39, 0]}>
+          <boxGeometry args={[0.07, 0.05, 0.07]} />
+          <meshStandardMaterial color={skin} roughness={0.55} />
+        </mesh>
+      </group>
       <group ref={rightArmRef} position={[-0.12, 0.28, 0]}>
-        <mesh position={[0, -0.08, 0]} castShadow>
+        <mesh position={[0, -0.08, 0]} castShadow={objectShadows}>
           <boxGeometry args={[0.06, 0.16, 0.06]} />
           <meshStandardMaterial color={sleeveColor} roughness={0.75} />
         </mesh>
@@ -863,7 +958,7 @@ export const AgentModel = memo(function AgentModel({
             <meshStandardMaterial color={cuffColor} roughness={0.75} />
           </mesh>
         ) : null}
-        <mesh position={[0, -0.17, 0]} castShadow>
+        <mesh position={[0, -0.17, 0]} castShadow={objectShadows}>
           <boxGeometry args={[0.05, 0.05, 0.05]} />
           <meshStandardMaterial color={skin} roughness={0.55} />
         </mesh>
@@ -956,7 +1051,7 @@ export const AgentModel = memo(function AgentModel({
         </group>
       </group>
       <group ref={leftArmRef} position={[0.12, 0.28, 0]}>
-        <mesh position={[0, -0.08, 0]} castShadow>
+        <mesh position={[0, -0.08, 0]} castShadow={objectShadows}>
           <boxGeometry args={[0.06, 0.16, 0.06]} />
           <meshStandardMaterial color={sleeveColor} roughness={0.75} />
         </mesh>
@@ -966,16 +1061,13 @@ export const AgentModel = memo(function AgentModel({
             <meshStandardMaterial color={cuffColor} roughness={0.75} />
           </mesh>
         ) : null}
-        <mesh position={[0, -0.17, 0]} castShadow>
+        <mesh position={[0, -0.17, 0]} castShadow={objectShadows}>
           <boxGeometry args={[0.05, 0.05, 0.05]} />
           <meshStandardMaterial color={skin} roughness={0.55} />
         </mesh>
       </group>
-      <mesh position={[0, 0.39, 0]}>
-        <boxGeometry args={[0.07, 0.05, 0.07]} />
-        <meshStandardMaterial color={skin} roughness={0.55} />
-      </mesh>
-      <mesh position={[0, 0.47, 0]} castShadow receiveShadow>
+      <group ref={headGroupRef}>
+      <mesh position={[0, 0.47, 0]} castShadow={objectShadows} receiveShadow={objectShadows}>
         <boxGeometry args={[0.16, 0.16, 0.14]} />
         <meshStandardMaterial attach="material-0" color={skin} roughness={0.55} />
         <meshStandardMaterial attach="material-1" color={skin} roughness={0.55} />
@@ -985,18 +1077,18 @@ export const AgentModel = memo(function AgentModel({
         <meshStandardMaterial attach="material-5" color={skin} roughness={0.55} />
       </mesh>
       {hairStyle === "short" ? (
-        <mesh position={[0, 0.555, 0]} castShadow>
+        <mesh position={[0, 0.555, 0]} castShadow={objectShadows}>
           <boxGeometry args={[0.17, 0.05, 0.15]} />
           <meshStandardMaterial color={hairColor} roughness={0.35} metalness={0.05} />
         </mesh>
       ) : null}
       {hairStyle === "parted" ? (
         <>
-          <mesh position={[0, 0.555, 0]} castShadow>
+          <mesh position={[0, 0.555, 0]} castShadow={objectShadows}>
             <boxGeometry args={[0.17, 0.045, 0.15]} />
             <meshStandardMaterial color={hairColor} roughness={0.35} metalness={0.05} />
           </mesh>
-          <mesh position={[-0.035, 0.59, 0.01]} rotation={[0.1, 0, -0.2]} castShadow>
+          <mesh position={[-0.035, 0.59, 0.01]} rotation={[0.1, 0, -0.2]} castShadow={objectShadows}>
             <boxGeometry args={[0.12, 0.03, 0.08]} />
             <meshStandardMaterial color={hairColor} roughness={0.35} metalness={0.05} />
           </mesh>
@@ -1004,19 +1096,19 @@ export const AgentModel = memo(function AgentModel({
       ) : null}
       {hairStyle === "spiky" ? (
         <>
-          <mesh position={[0, 0.55, 0]} castShadow>
+          <mesh position={[0, 0.55, 0]} castShadow={objectShadows}>
             <boxGeometry args={[0.16, 0.035, 0.14]} />
             <meshStandardMaterial color={hairColor} roughness={0.35} metalness={0.05} />
           </mesh>
-          <mesh position={[-0.05, 0.59, 0]} rotation={[0, 0, -0.2]} castShadow>
+          <mesh position={[-0.05, 0.59, 0]} rotation={[0, 0, -0.2]} castShadow={objectShadows}>
             <boxGeometry args={[0.04, 0.06, 0.04]} />
             <meshStandardMaterial color={hairColor} roughness={0.35} metalness={0.05} />
           </mesh>
-          <mesh position={[0, 0.605, 0]} rotation={[0, 0, 0]} castShadow>
+          <mesh position={[0, 0.605, 0]} rotation={[0, 0, 0]} castShadow={objectShadows}>
             <boxGeometry args={[0.04, 0.08, 0.04]} />
             <meshStandardMaterial color={hairColor} roughness={0.35} metalness={0.05} />
           </mesh>
-          <mesh position={[0.05, 0.59, 0]} rotation={[0, 0, 0.2]} castShadow>
+          <mesh position={[0.05, 0.59, 0]} rotation={[0, 0, 0.2]} castShadow={objectShadows}>
             <boxGeometry args={[0.04, 0.06, 0.04]} />
             <meshStandardMaterial color={hairColor} roughness={0.35} metalness={0.05} />
           </mesh>
@@ -1024,11 +1116,11 @@ export const AgentModel = memo(function AgentModel({
       ) : null}
       {hairStyle === "bun" ? (
         <>
-          <mesh position={[0, 0.548, 0]} castShadow>
+          <mesh position={[0, 0.548, 0]} castShadow={objectShadows}>
             <boxGeometry args={[0.17, 0.04, 0.15]} />
             <meshStandardMaterial color={hairColor} roughness={0.35} metalness={0.05} />
           </mesh>
-          <mesh position={[0, 0.6, -0.035]} castShadow>
+          <mesh position={[0, 0.6, -0.035]} castShadow={objectShadows}>
             <sphereGeometry args={[0.042, 14, 14]} />
             <meshStandardMaterial color={hairColor} roughness={0.35} metalness={0.05} />
           </mesh>
@@ -1036,7 +1128,7 @@ export const AgentModel = memo(function AgentModel({
       ) : null}
       {hatStyle === "cap" ? (
         <>
-          <mesh position={[0, 0.59, 0]} castShadow>
+          <mesh position={[0, 0.59, 0]} castShadow={objectShadows}>
             <boxGeometry args={[0.172, 0.03, 0.152]} />
             <meshStandardMaterial color={accessoryColor} roughness={0.75} />
           </mesh>
@@ -1047,14 +1139,14 @@ export const AgentModel = memo(function AgentModel({
         </>
       ) : null}
       {hatStyle === "beanie" ? (
-        <mesh position={[0, 0.59, 0]} castShadow>
+        <mesh position={[0, 0.59, 0]} castShadow={objectShadows}>
           <boxGeometry args={[0.18, 0.06, 0.16]} />
           <meshStandardMaterial color={accessoryColor} roughness={0.75} />
         </mesh>
       ) : null}
       {showHeadset ? (
         <>
-          <mesh position={[0, 0.57, 0]} rotation={[0, 0, Math.PI / 2]} castShadow>
+          <mesh position={[0, 0.57, 0]} rotation={[0, 0, Math.PI / 2]} castShadow={objectShadows}>
             <torusGeometry args={[0.09, 0.008, 8, 24, Math.PI]} />
             <meshStandardMaterial color="#94a3b8" roughness={0.4} metalness={0.25} />
           </mesh>
@@ -1151,6 +1243,7 @@ export const AgentModel = memo(function AgentModel({
         <boxGeometry args={[0.014, 0.014, 0.01]} />
         <meshBasicMaterial color="#9c4a4a" />
       </mesh>
+      </group>
       <mesh
         ref={pulseRingRef}
         position={[0, 0.005, 0]}

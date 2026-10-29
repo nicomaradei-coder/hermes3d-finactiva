@@ -169,7 +169,23 @@ describe("studio settings normalization", () => {
     );
     expect(normalized.office.bad).toEqual(
       expect.objectContaining({
-        title: "Luke Headquarters",
+        title: "FINACTIVA HQ",
+      }),
+    );
+  });
+
+  it("migrates legacy Luke Headquarters title to FINACTIVA HQ", () => {
+    const normalized = normalizeStudioSettings({
+      office: {
+        "http://127.0.0.1:7770": {
+          title: "Luke Headquarters",
+        },
+      },
+    });
+    // Loopback host normalizes to localhost in the office preference key.
+    expect(normalized.office["http://localhost:7770"]).toEqual(
+      expect.objectContaining({
+        title: "FINACTIVA HQ",
       }),
     );
   });
@@ -178,7 +194,7 @@ describe("studio settings normalization", () => {
     const current = normalizeStudioSettings({
       office: {
         "ws://localhost:18789": {
-          title: "Luke Headquarters",
+          title: "FINACTIVA HQ",
         },
       },
     });

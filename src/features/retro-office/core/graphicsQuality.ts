@@ -1,5 +1,11 @@
 // Graphics quality presets for the immersive office renderer.
 // Persisted in localStorage so the choice survives reloads.
+//
+// Visual profile mapping (UI labels):
+//   low      → ECO
+//   balanced → BALANCED
+//   ultra    → HIGH
+// Storage keys remain "low" | "balanced" | "ultra" for compatibility.
 
 export type GraphicsQuality = "low" | "balanced" | "ultra";
 
@@ -12,26 +18,37 @@ export const GRAPHICS_QUALITY_OPTIONS: Array<{
 }> = [
   {
     id: "low",
-    label: "Low",
-    description: "Fastest. No post-processing, small shadow maps.",
+    label: "ECO",
+    description:
+      "Notebook-first. No shadows, no post-FX, capped DPR, light lighting.",
   },
   {
     id: "balanced",
-    label: "Balanced",
-    description: "Ambient occlusion, bloom and soft shadows.",
+    label: "BALANCED",
+    description: "Moderate shadows and post-FX. Target up to ~60 FPS.",
   },
   {
     id: "ultra",
-    label: "Ultra",
-    description: "Maximum fidelity. Large shadow maps and full effects.",
+    label: "HIGH",
+    description: "Original fidelity. Large shadow maps and full effects.",
   },
 ];
 
 export type GraphicsQualityConfig = {
-  /** Shadow map resolution for the key light. */
+  /** When false, the WebGL renderer does not allocate or sample shadow maps. */
+  enableShadows: boolean;
+  /** Shadow map resolution for the key light (ignored when enableShadows is false). */
   shadowMapSize: number;
+  /** Distant props (park trees) cast shadows when true. */
+  enableDistantShadows: boolean;
+  /** Agents / near furniture may cast shadows when true (and enableShadows). */
+  enableObjectShadows: boolean;
+  /** Canvas MSAA / native antialias. */
+  antialias: boolean;
   /** Upper bound for the adaptive device pixel ratio controller. */
   maxDpr: number;
+  /** Adaptive DPR sample window (frames between adjustments). */
+  adaptiveDprIntervalFrames: number;
   /** Whether the EffectComposer post-processing chain is mounted. */
   postProcessing: boolean;
   /** Screen-space ambient occlusion (N8AO). */
@@ -44,38 +61,74 @@ export type GraphicsQualityConfig = {
   smaa: boolean;
   /** Depth of field while the follow camera is active. */
   followDepthOfField: boolean;
+  /** Dust mote particle count (0 disables the system entirely). */
+  dustMoteCount: number;
+  /** Slow sun color/position drift. Off in ECO to save CPU. */
+  enableDaylightDrift: boolean;
+  /**
+   * When true, load the HDRI Environment (IBL + sky).
+   * When false, use lightweight ambient/hemisphere/directional only.
+   */
+  useHdriEnvironment: boolean;
 };
 
 const QUALITY_CONFIGS: Record<GraphicsQuality, GraphicsQualityConfig> = {
+  // ECO — notebook / low GPU
   low: {
-    shadowMapSize: 1024,
-    maxDpr: 1.25,
+    enableShadows: false,
+    shadowMapSize: 512,
+    enableDistantShadows: false,
+    enableObjectShadows: false,
+    antialias: false,
+    maxDpr: 1,
+    adaptiveDprIntervalFrames: 120,
     postProcessing: false,
     ambientOcclusion: false,
     aoQuality: "performance",
     bloom: false,
     smaa: false,
     followDepthOfField: false,
+    dustMoteCount: 0,
+    enableDaylightDrift: false,
+    useHdriEnvironment: false,
   },
+  // BALANCED — intermediate
   balanced: {
-    shadowMapSize: 2048,
-    maxDpr: 1.5,
+    enableShadows: true,
+    shadowMapSize: 1024,
+    enableDistantShadows: false,
+    enableObjectShadows: true,
+    antialias: true,
+    maxDpr: 1.25,
+    adaptiveDprIntervalFrames: 60,
     postProcessing: true,
     ambientOcclusion: true,
-    aoQuality: "low",
+    aoQuality: "performance",
     bloom: true,
     smaa: true,
     followDepthOfField: false,
+    dustMoteCount: 80,
+    enableDaylightDrift: true,
+    useHdriEnvironment: true,
   },
+  // HIGH — original ultra fidelity
   ultra: {
+    enableShadows: true,
     shadowMapSize: 4096,
+    enableDistantShadows: true,
+    enableObjectShadows: true,
+    antialias: true,
     maxDpr: 2,
+    adaptiveDprIntervalFrames: 45,
     postProcessing: true,
     ambientOcclusion: true,
     aoQuality: "medium",
     bloom: true,
     smaa: true,
     followDepthOfField: true,
+    dustMoteCount: 220,
+    enableDaylightDrift: true,
+    useHdriEnvironment: true,
   },
 };
 
@@ -104,7 +157,7 @@ export const loadGraphicsQuality = (): GraphicsQuality =>
 /**
  * True when WebGL runs on a CPU rasterizer (SwiftShader, llvmpipe, …).
  * Software renderers cannot keep up with the full pipeline and may lose
- * the GL context, so callers should drop to the "low" preset.
+ * the GL context, so callers should drop to the "low" (ECO) preset.
  */
 export const isSoftwareWebGLRenderer = (
   context: WebGLRenderingContext | WebGL2RenderingContext,

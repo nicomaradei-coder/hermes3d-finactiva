@@ -1,6 +1,6 @@
 export const DESK_STICKY_MS = 10_000;
 export const SNAP_GRID = 10;
-export const STORAGE_KEY = "hermes-office-furniture-v9";
+export const STORAGE_KEY = "hermes-office-furniture-v12";
 export const ATM_MIGRATION_KEY = "hermes-office-atm-migration-v1";
 export const SERVER_ROOM_MIGRATION_KEY =
   "hermes-office-server-room-migration-v3";
@@ -14,8 +14,10 @@ export const DOOR_THICKNESS = 8;
 export const DOOR_LENGTH = 40;
 export const MIN_WALL_LENGTH = SNAP_GRID * 2;
 export const ELEVATION_STEP = 0.08;
-export const WALK_SPEED = 0.3;
-export const WORKING_WALK_SPEED_MULTIPLIER = 3;
+/** Canvas units per tick at 60 FPS baseline (~0.6 world units/sec). */
+export const WALK_SPEED = 0.55;
+/** Desk approach multiplier — wall-clock via GameLoop delta scaling. */
+export const WORKING_WALK_SPEED_MULTIPLIER = 2.6;
 export const WALK_ANIM_SPEED = 0.15;
 export const AGENT_SCALE = 1.75;
 export const BUMP_FREEZE_MS = 1500;

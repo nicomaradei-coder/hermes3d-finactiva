@@ -9,7 +9,13 @@ import {
   SCALE,
   WALL_THICKNESS,
 } from "@/features/retro-office/core/constants";
-import { getItemRotationRadians, toWorld } from "@/features/retro-office/core/geometry";
+import {
+  getItemRotationRadians,
+  ITEM_FOOTPRINT,
+  toWorld,
+} from "@/features/retro-office/core/geometry";
+
+const ITEM_FOOTPRINT_SAFE = ITEM_FOOTPRINT;
 import {
   getBrushedMetalTextures,
   getPlasterTextures,
@@ -385,13 +391,17 @@ export function KeyboardModel({
   onPointerOut,
   editMode,
 }: BasicFurnitureModelProps) {
-  const [wx, , wz] = toWorld(item.x, item.y);
-  const yBase = 0.621;
+  const [w, h] = ITEM_FOOTPRINT_SAFE.keyboard;
+  const [wx, , wz] = toWorld(item.x + w / 2, item.y + h / 2);
+  // Desk cubicle slab top (0.577) + half keyboard thickness.
+  const yBase = 0.588;
+  const rotY = getItemRotationRadians(item);
   const metal = useMemo(() => getBrushedMetalTextures(), []);
 
   return (
     <group
       position={[wx, yBase, wz]}
+      rotation={[0, rotY, 0]}
       onPointerDown={(event) => {
         if (!editMode) return;
         event.stopPropagation();
@@ -433,12 +443,15 @@ export function MouseModel({
   onPointerOut,
   editMode,
 }: BasicFurnitureModelProps) {
-  const [wx, , wz] = toWorld(item.x, item.y);
-  const yBase = 0.621;
+  const [w, h] = ITEM_FOOTPRINT_SAFE.mouse;
+  const [wx, , wz] = toWorld(item.x + w / 2, item.y + h / 2);
+  const yBase = 0.588;
+  const rotY = getItemRotationRadians(item);
 
   return (
     <group
       position={[wx, yBase, wz]}
+      rotation={[0, rotY, 0]}
       onPointerDown={(event) => {
         if (!editMode) return;
         event.stopPropagation();

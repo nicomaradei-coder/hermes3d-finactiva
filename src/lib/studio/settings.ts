@@ -22,6 +22,7 @@ import {
   type TaskBoardPreference,
   type TaskBoardPreferencePatch,
 } from "@/features/office/tasks/types";
+import { FINACTIVA_BRAND } from "@/features/retro-office/core/finactivaBrand";
 
 export type StudioGatewaySettings = {
   url: string;
@@ -557,7 +558,7 @@ const normalizeTaskBoardPreference = (
   };
 };
 
-const DEFAULT_OFFICE_TITLE = "Luke Headquarters";
+const DEFAULT_OFFICE_TITLE = FINACTIVA_BRAND.officeTitle;
 const DEFAULT_REMOTE_OFFICE_LABEL = "Remote Office";
 const DEFAULT_REMOTE_OFFICE_SOURCE_KIND = "presence_endpoint" as const;
 
@@ -566,7 +567,11 @@ const normalizeOfficeTitle = (
   fallback: string = DEFAULT_OFFICE_TITLE
 ) => {
   const title = coerceString(value);
-  return (title || fallback).slice(0, 48);
+  // Pilot identity cutover: migrate the Hermes demo default when still stored.
+  if (!title || title === FINACTIVA_BRAND.legacyOfficeTitle) {
+    return fallback.slice(0, 48);
+  }
+  return title.slice(0, 48);
 };
 
 const normalizeRemoteOfficeLabel = (

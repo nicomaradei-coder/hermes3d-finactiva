@@ -5,6 +5,7 @@ import type { ThreeEvent } from "@react-three/fiber";
 import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { SCALE } from "@/features/retro-office/core/constants";
+import { useObjectShadowsEnabled } from "@/features/retro-office/core/GraphicsQualityContext";
 import {
   FURNITURE_ROTATION,
   getItemBaseSize,
@@ -43,7 +44,9 @@ export const FURNITURE_GLB: Record<string, string> = {
 export const FURNITURE_SCALE: Record<string, [number, number, number]> = {
   desk_cubicle: [1.5, 1.5, 1.5],
   executive_desk: [1.8, 1.8, 1.8],
-  chair: [1.2, 1.2, 1.2],
+  // 1.0 keeps chairDesk.glb inside the 24×24 seat pad; 1.2 overflowed into
+  // the agent hip volume and read as seat clipping even with aisle-clear chairs.
+  chair: [1.0, 1.0, 1.0],
   round_table: [3.2, 3.2, 3.2],
   couch: [1.8, 1.8, 1.8],
   couch_v: [1.4, 1.4, 1.4],
@@ -64,7 +67,28 @@ export const FURNITURE_SCALE: Record<string, [number, number, number]> = {
 };
 
 export const FURNITURE_Y_OFFSET: Record<string, number> = {
-  computer: 0.61,
+  // Rest computerScreen.glb (minY=0) on the measured desk_cubicle slab top.
+  computer: 0.577,
+};
+
+/**
+ * Local GLB origin corrections so the visible mesh sits inside ITEM_FOOTPRINT.
+ * desk.glb @ scale 1.5 extends ~0.57wu north (−Z) of the canvas top-left origin,
+ * which swallowed chair seats and caused agent/desk clipping. Shift +Z/+X to
+ * keep the slab inside the 100×55 footprint.
+ */
+export const FURNITURE_MODEL_OFFSET: Record<
+  string,
+  [number, number, number]
+> = {
+  // Was [0.35,0,0.55] — that parked the visual slab too far into +Z (away
+  // from aisle chairs). 0.38 keeps the mesh inside the footprint while
+  // pulling the near lip ~0.25wu toward seated agents (reach-gap fix).
+  desk_cubicle: [0.35, 0, 0.38],
+  // chairDesk.glb is slightly off-center; nudge onto the 24×24 seat pad.
+  chair: [0.02, 0, 0.08],
+  // computerScreen.glb origin sits on the left edge (x 0…0.393); center it.
+  computer: [-0.216, 0, 0.057],
 };
 
 /** Global offset for all kanban desk clutter (papers, monitor, mug, etc.). */
@@ -109,7 +133,7 @@ const resolveFurnitureTemplate = (params: {
   itemType: string;
   scene: THREE.Object3D;
 }) => {
-  const cacheKey = `${params.glbPath}:${params.itemType}:${params.itemColor ?? ""}`;
+  const cacheKey = `${params.glbPath}:${params.itemType}:${params.itemColor ?? ""}:screen-v2`;
   const cached = furnitureTemplateCache.get(cacheKey);
   if (cached) return cached;
 
@@ -129,6 +153,28 @@ const resolveFurnitureTemplate = (params: {
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     const templateMats = mats.map((material, materialIndex) => {
       const nextMaterial = material.clone() as THREE.MeshStandardMaterial;
+      const materialName = (material.name || nextMaterial.name || "").toLowerCase();
+      // computerScreen.glb: keep metalDark as a lit screen face so front/back
+      // stay distinguishable after the frame tint (both faces looked identical).
+      if (
+        params.itemType === "computer" &&
+        materialName.includes("metaldark") &&
+        "color" in nextMaterial
+      ) {
+        nextMaterial.color.set("#1a2338");
+        if ("emissive" in nextMaterial) {
+          nextMaterial.emissive.set("#243556");
+          nextMaterial.emissiveIntensity = 0.55;
+        }
+        if ("roughness" in nextMaterial) nextMaterial.roughness = 0.35;
+        if ("metalness" in nextMaterial) nextMaterial.metalness = 0.05;
+        nextMaterial.userData = {
+          ...nextMaterial.userData,
+          furnitureSharedMaterial: true,
+          computerScreenFace: true,
+        };
+        return nextMaterial;
+      }
       if (tintColor && "color" in nextMaterial) {
         // Strong lerp toward the tint keeps the color rich instead of letting
         // the pale GLB base albedo wash it out.
@@ -173,6 +219,7 @@ const buildFurnitureItemMatrix = (item: FurnitureItem, itemType: string) => {
   const { width, height } = getItemBaseSize(item);
   const pivotX = width * SCALE * 0.5;
   const pivotZ = height * SCALE * 0.5;
+  const modelOffset = FURNITURE_MODEL_OFFSET[itemType] ?? [0, 0, 0];
 
   const containerMatrix = new THREE.Matrix4().makeTranslation(wx, yOffset, wz);
   const pivotMatrix = new THREE.Matrix4().makeTranslation(pivotX, 0, pivotZ);
@@ -187,12 +234,19 @@ const buildFurnitureItemMatrix = (item: FurnitureItem, itemType: string) => {
     scale[1],
     scale[2],
   );
+  // Apply mesh origin correction in local model space (after scale).
+  const modelOffsetMatrix = new THREE.Matrix4().makeTranslation(
+    modelOffset[0],
+    modelOffset[1],
+    modelOffset[2],
+  );
 
   return containerMatrix
     .multiply(pivotMatrix)
     .multiply(rotationMatrix)
     .multiply(unpivotMatrix)
-    .multiply(scaleMatrix);
+    .multiply(scaleMatrix)
+    .multiply(modelOffsetMatrix);
 };
 
 type ProceduralModelProps = {
@@ -464,6 +518,7 @@ export function InstancedFurnitureItems({
   items: FurnitureItem[];
   onItemClick?: (itemUid: string) => void;
 }) {
+  const objectShadows = useObjectShadowsEnabled();
   const glbPath = FURNITURE_GLB[itemType] ?? FURNITURE_GLB.table_rect;
   const { scene } = useGLTF(glbPath);
   const template = useMemo(
@@ -542,8 +597,8 @@ export function InstancedFurnitureItems({
             meshRefs.current[meshIndex] = node;
           }}
           args={[def.geometry, def.material, items.length]}
-          castShadow={def.castShadow}
-          receiveShadow={def.receiveShadow}
+          castShadow={objectShadows && def.castShadow}
+          receiveShadow={objectShadows && def.receiveShadow}
           onClick={handleClick}
         />
       ))}
@@ -562,6 +617,7 @@ export function FurnitureModel({
   onPointerOut,
   onClick,
 }: InteractiveFurnitureModelProps) {
+  const objectShadows = useObjectShadowsEnabled();
   const itemType = resolveItemTypeKey(item);
   const glbPath = FURNITURE_GLB[itemType] ?? FURNITURE_GLB.table_rect;
   const { scene } = useGLTF(glbPath);
@@ -576,6 +632,14 @@ export function FurnitureModel({
     [glbPath, item.color, itemType, scene],
   );
   const cloned = useMemo(() => template.clone(true), [template]);
+  useLayoutEffect(() => {
+    cloned.traverse((child) => {
+      if (!(child as THREE.Mesh).isMesh) return;
+      const mesh = child as THREE.Mesh;
+      mesh.castShadow = objectShadows;
+      mesh.receiveShadow = objectShadows;
+    });
+  }, [cloned, objectShadows]);
   const [wx, , wz] = toWorld(item.x, item.y);
   const yOffset = (FURNITURE_Y_OFFSET[itemType] ?? 0) + (item.elevation ?? 0);
   const scale = FURNITURE_SCALE[itemType] ?? [1, 1, 1];
@@ -810,7 +874,29 @@ export function FurnitureModel({
           />
         ) : (
           <group position={[-pivotX, 0, -pivotZ]} scale={scale}>
-            <primitive object={cloned} />
+            <group
+              position={FURNITURE_MODEL_OFFSET[itemType] ?? [0, 0, 0]}
+            >
+              <primitive object={cloned} />
+              {/*
+                computerScreen.glb is thin on Z (−0.104…0). A lit panel on the
+                local +Z face marks the readable screen so workstation facing
+                (+180 from agent heading) can be judged visually.
+              */}
+              {itemType === "computer" ? (
+                <mesh position={[0.196, 0.175, 0.004]} castShadow={false}>
+                  <planeGeometry args={[0.3, 0.2]} />
+                  <meshStandardMaterial
+                    color="#152038"
+                    emissive="#3a6ea5"
+                    emissiveIntensity={0.7}
+                    roughness={0.25}
+                    metalness={0.02}
+                    side={THREE.FrontSide}
+                  />
+                </mesh>
+              ) : null}
+            </group>
           </group>
         )}
         {itemType === "kanban_board" ? (

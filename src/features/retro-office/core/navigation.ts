@@ -349,10 +349,16 @@ export function astar(
   return [];
 }
 
-export const getDeskLocations = (items: FurnitureItem[]) =>
-  items
-    .filter((item) => item.type === "desk_cubicle")
-    .map((item) => ({ x: item.x + 40, y: item.y - 5 }));
+export type { DeskSeatLocation } from "@/features/retro-office/core/deskSeats";
+export {
+  DESK_CHAIR_MATCH_RADIUS,
+  DESK_SEAT_PULL_BACK,
+  DESK_SIT_ARRIVE_RADIUS,
+  DESK_SIT_LEAVE_RADIUS,
+  getDeskLocations,
+  orientDeskChairsTowardDesks,
+  resolveDeskIndexForItem,
+} from "@/features/retro-office/core/deskSeats";
 
 export const getMeetingSeatLocations = (items: FurnitureItem[]) => {
   // Meeting seats are inferred from chair placement in the conference area so standup
@@ -539,28 +545,3 @@ export const MEETING_OVERFLOW_LOCATIONS = [
   { x: 145, y: 24, facing: Math.PI },
   { x: 145, y: 220, facing: 0 },
 ];
-
-export const resolveDeskIndexForItem = (
-  item: FurnitureItem,
-  deskLocations: { x: number; y: number }[],
-): number => {
-  if (deskLocations.length === 0) return -1;
-  if (item.type === "desk_cubicle") {
-    return deskLocations.findIndex(
-      (desk) => desk.x === item.x + 40 && desk.y === item.y - 5,
-    );
-  }
-
-  let bestIndex = -1;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (let index = 0; index < deskLocations.length; index += 1) {
-    const desk = deskLocations[index];
-    if (!desk) continue;
-    const distance = Math.hypot(item.x - desk.x, item.y - desk.y);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      bestIndex = index;
-    }
-  }
-  return bestDistance <= 80 ? bestIndex : -1;
-};
