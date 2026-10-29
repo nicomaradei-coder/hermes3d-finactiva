@@ -243,6 +243,41 @@ const buildAgentsFromExplicitList = (raw: unknown): SyntheticAgent[] => {
   return agents;
 };
 
+export function resolveCustomRuntimeFleet(
+  state: CustomRuntimeStateResponse | null,
+  registry: CustomRuntimeRegistryResponse | null = null,
+  runtimeName = "Finactiva AI Office",
+): { agents: SyntheticAgent[]; source: "state" | "registry" | "legacy" | "none" } {
+  const stateList = Array.isArray(state?.agents)
+    ? buildAgentsFromExplicitList(state.agents)
+    : null;
+  if (stateList && stateList.length > 0) {
+    return { agents: stateList, source: "state" };
+  }
+  const registryList = Array.isArray(registry?.agents)
+    ? buildAgentsFromExplicitList(registry.agents)
+    : null;
+  if (registryList && registryList.length > 0) {
+    return { agents: registryList, source: "registry" };
+  }
+  // An explicit empty list, or both payloads missing, is not a synthetic agent.
+  if (stateList || registryList || (state === null && registry === null)) {
+    return { agents: [], source: "none" };
+  }
+  return {
+    agents: buildSyntheticAgents(state, runtimeName, registry),
+    source: "legacy",
+  };
+}
+
+export function listCustomRuntimeAgents(
+  state: CustomRuntimeStateResponse | null,
+  registry: CustomRuntimeRegistryResponse | null = null,
+  runtimeName = "Finactiva AI Office",
+): SyntheticAgent[] {
+  return resolveCustomRuntimeFleet(state, registry, runtimeName).agents;
+}
+
 const buildSyntheticAgents = (
   state: CustomRuntimeStateResponse | null,
   runtimeName: string,
@@ -441,9 +476,30 @@ export class CustomRuntimeProvider implements RuntimeProvider {
   }
 
   private async callAgentsList() {
-    const descriptor = await this.describeRuntime();
-    const runtimeName = descriptor.metadata.runtimeName ?? this.metadata.runtimeName ?? "Custom Runtime";
-    const agents = buildSyntheticAgents(descriptor.state, runtimeName, descriptor.registry);
+    const [stateOutcome, registryOutcome] = await Promise.all([
+      this.fetchState()
+        .then((value) => ({ ok: true as const, value }))
+        .catch((error: unknown) => ({ ok: false as const, error })),
+      this.fetchRegistry()
+        .then((value) => ({ ok: true as const, value }))
+        .catch((error: unknown) => ({ ok: false as const, error })),
+    ]);
+    if (!stateOutcome.ok && !registryOutcome.ok) {
+      const error = stateOutcome.error;
+      throw error instanceof Error
+        ? error
+        : new Error("No se pudo leer el roster del adapter.");
+    }
+    const state = stateOutcome.ok ? stateOutcome.value : null;
+    const registry = registryOutcome.ok ? registryOutcome.value : null;
+    const runtimeName =
+      typeof state?.runtime?.name === "string" && state.runtime.name.trim()
+        ? state.runtime.name.trim()
+        : this.metadata.runtimeName ?? "Custom Runtime";
+    const agents = resolveCustomRuntimeFleet(state, registry, runtimeName).agents;
+    if (agents.length === 0) {
+      throw new Error("El adapter no devolvió agentes en /state ni /registry.");
+    }
     return {
       defaultId: agents[0]?.id ?? "main",
       mainKey: "main",

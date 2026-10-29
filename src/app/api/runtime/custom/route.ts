@@ -9,25 +9,29 @@ type CustomRuntimeRequestBody = {
   body?: unknown;
 };
 
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
 const isRuntimeUrlAllowed = (runtimeUrl: string): boolean => {
+  let hostname = "";
+  try {
+    hostname = new URL(runtimeUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  } catch {
+    return false;
+  }
+  // Loopback is always allowed. Every other host needs an explicit allowlist,
+  // in development and in production.
+  if (LOOPBACK_HOSTS.has(hostname)) return true;
   const rawAllowlist = (
     process.env.CUSTOM_RUNTIME_ALLOWLIST ||
     process.env.UPSTREAM_ALLOWLIST ||
     ""
   ).trim();
-  if (!rawAllowlist) {
-    return process.env.NODE_ENV !== "production";
-  }
-  try {
-    const parsed = new URL(runtimeUrl);
-    const allowed = rawAllowlist
-      .split(",")
-      .map((entry) => entry.trim().toLowerCase())
-      .filter(Boolean);
-    return allowed.includes(parsed.hostname.toLowerCase());
-  } catch {
-    return false;
-  }
+  if (!rawAllowlist) return false;
+  const allowed = rawAllowlist
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  return allowed.includes(hostname);
 };
 
 const normalizeRuntimeUrl = (value: string): string => {

@@ -28,6 +28,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import { SettingsPanel } from "@/features/office/components/panels/SettingsPanel";
+import { buildOfficeCanvasResetKey } from "@/features/retro-office/core/canvasResetKey";
 import type { OfficeRenderMode } from "@/features/office/renderMode";
 import { AtmImmersiveScreen } from "@/features/office/screens/AtmImmersiveScreen";
 import { GithubImmersiveScreen } from "@/features/office/screens/GithubImmersiveScreen";
@@ -3404,13 +3405,12 @@ export function RetroOffice3D({
   );
   const canvasResetKey = useMemo(
     () =>
-      [
-        remoteOfficeEnabled ? "remote" : "local",
-        gatewayStatus ?? "unknown",
-        String(agents.length),
-        String(officeCenterSignal),
-      ].join(":"),
-    [agents.length, gatewayStatus, officeCenterSignal, remoteOfficeEnabled],
+      buildOfficeCanvasResetKey({
+        remoteOfficeEnabled,
+        gatewayStatus,
+        officeCenterSignal,
+      }),
+    [gatewayStatus, officeCenterSignal, remoteOfficeEnabled],
   );
   // New Idea 7: heatmap mode.
   const [heatmapMode, setHeatmapMode] = useState(false);
