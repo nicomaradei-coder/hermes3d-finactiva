@@ -41,8 +41,16 @@ import {
   renameGatewayAgent,
 } from "@/lib/gateway/agentConfig";
 import {
-  runStudioBootstrapLoadOperation,
+  commandsForFleetApply,
   executeStudioBootstrapLoadCommands,
+  FLEET_SYNC_MAX_RETRIES,
+  FLEET_SYNC_RETRY_MS,
+  FLEET_SYNC_TIMEOUT_MS,
+  fleetHydrationAccepted,
+  isOfficeSceneReady,
+  raceWithTimeout,
+  runStudioBootstrapLoadOperation,
+  type StudioBootstrapLoadCommand,
 } from "@/features/agents/operations/studioBootstrapOperation";
 import { isGatewayDisconnectLikeError } from "@/lib/gateway/GatewayClient";
 import { createGatewayRuntimeEventHandler } from "@/features/agents/state/gatewayRuntimeEventHandler";
@@ -151,6 +159,8 @@ import type {
 } from "@/features/company-builder/types";
 import { AnalyticsPanel } from "@/features/office/components/panels/AnalyticsPanel";
 import { HistoryPanel } from "@/features/office/components/panels/HistoryPanel";
+import { EmmaQaPanel } from "@/features/office/components/panels/EmmaQaPanel";
+import { isEmmaSelection } from "@/lib/finactiva/emmaQaClient";
 import { InboxPanel } from "@/features/office/components/panels/InboxPanel";
 import { KanbanDisabledPanel } from "@/features/office/components/panels/KanbanDisabledPanel";
 import { PlaybooksPanel } from "@/features/office/components/panels/PlaybooksPanel";
@@ -1024,6 +1034,7 @@ export function OfficeScreen({
   const [remoteChatByAgentId, setRemoteChatByAgentId] = useState<
     Record<string, RemoteChatSessionState>
   >({});
+  const [emmaQaOpen, setEmmaQaOpen] = useState(false);
   const [agentEditorAgentId, setAgentEditorAgentId] = useState<string | null>(null);
   const [agentEditorInitialSection, setAgentEditorInitialSection] =
     useState<AgentEditorSection>("avatar");
@@ -1504,21 +1515,39 @@ export function OfficeScreen({
           options?.forceSettings
             ? { force: true }
             : { maxAgeMs: options?.settingsMaxAgeMs ?? 60_000 };
-        const commands = await runStudioBootstrapLoadOperation({
-          client: provider,
-          gatewayUrl,
-          cachedConfigSnapshot: gatewayConfigSnapshot.current,
-          loadStudioSettings: () => loadStudioSettings(settingsLoadOptions),
-          isDisconnectLikeError: isGatewayDisconnectLikeError,
-          preferredSelectedAgentId: null,
-          hasCurrentSelection: false,
-          logError: console.error,
-        });
+        let commands: StudioBootstrapLoadCommand[];
+        try {
+          commands = await raceWithTimeout(
+            runStudioBootstrapLoadOperation({
+              client: provider,
+              gatewayUrl,
+              cachedConfigSnapshot: gatewayConfigSnapshot.current,
+              loadStudioSettings: () => loadStudioSettings(settingsLoadOptions),
+              isDisconnectLikeError: isGatewayDisconnectLikeError,
+              preferredSelectedAgentId: null,
+              hasCurrentSelection: false,
+              logError: console.error,
+            }),
+            FLEET_SYNC_TIMEOUT_MS,
+            "La sincronización del roster superó el tiempo de espera.",
+          );
+        } catch (error) {
+          commands = [
+            {
+              kind: "set-error",
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "No se pudo sincronizar el roster.",
+            },
+          ];
+        }
         if (connectionEpochAtStart !== connectionEpochRef.current) {
           return;
         }
+        const fleetReady = fleetHydrationAccepted(commands);
         executeStudioBootstrapLoadCommands({
-          commands,
+          commands: commandsForFleetApply(commands, fleetReady),
           setGatewayConfigSnapshot: (val: GatewayModelPolicySnapshot) => {
             gatewayConfigSnapshot.current = val;
           },
@@ -1529,6 +1558,9 @@ export function OfficeScreen({
           setError,
         });
         if (connectionEpochAtStart !== connectionEpochRef.current) {
+          return;
+        }
+        if (!fleetReady) {
           return;
         }
         const refreshedAgents = stateRef.current.agents;
@@ -1664,7 +1696,9 @@ export function OfficeScreen({
           console.info("[office-debug] Reconciled agent state.", debugCollector);
         }
         lastGatewayActivityAtRef.current = Date.now();
-        setAgentsLoaded(true);
+        if (fleetReady) {
+          setAgentsLoaded(true);
+        }
       } finally {
         if (!options?.silent) {
           setLoading(false);
@@ -2520,6 +2554,7 @@ export function OfficeScreen({
   // stuck on the lone "Main" placeholder. When connected and the fleet is
   // still exactly that placeholder, force one reload per connection.
   const demoPlaceholderReloadRef = useRef(false);
+  const fleetRetryCountRef = useRef(0);
   useEffect(() => {
     if (status !== "connected") {
       demoPlaceholderReloadRef.current = false;
@@ -2535,16 +2570,23 @@ export function OfficeScreen({
   }, [agentsLoaded, loadAgents, state.agents, status]);
 
   useEffect(() => {
-    if (status !== "connected") return;
-    if (state.loading) return;
-    if (state.agents.length > 0) return;
+    if (status !== "connected") {
+      fleetRetryCountRef.current = 0;
+      return;
+    }
+    if (agentsLoaded || state.loading || state.agents.length > 0) {
+      if (agentsLoaded) fleetRetryCountRef.current = 0;
+      return;
+    }
+    if (fleetRetryCountRef.current >= FLEET_SYNC_MAX_RETRIES) return;
     const timeoutId = window.setTimeout(() => {
+      fleetRetryCountRef.current += 1;
       void loadAgents({ forceSettings: true });
-    }, 500);
+    }, FLEET_SYNC_RETRY_MS);
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [loadAgents, state.agents.length, state.loading, status]);
+  }, [agentsLoaded, loadAgents, state.agents.length, state.loading, status]);
 
   useEffect(() => {
     if (status === "disconnected") {
@@ -3502,6 +3544,15 @@ export function OfficeScreen({
       focusChatTarget(agentId);
     },
     [focusChatTarget],
+  );
+  const openEmmaQa = useCallback(
+    (agentId: string) => {
+      const agent = state.agents.find((entry) => entry.agentId === agentId);
+      if (!isEmmaSelection({ id: agentId, name: agent?.name ?? null })) return false;
+      setEmmaQaOpen(true);
+      return true;
+    },
+    [state.agents],
   );
   const updateRemoteChatSession = useCallback(
     (
@@ -4536,7 +4587,9 @@ export function OfficeScreen({
   // Defer mounting the heavy office renderers (Three.js / Phaser) until a
   // gateway connection exists, so users can pick 2D vs. 3D on the connect
   // screen before either pipeline loads.
-  const officeSceneReady = agentsLoaded || status === "connected";
+  // Connected only means the health probe succeeded. The roster stays hidden
+  // until agents.list has hydrated, so a zero count is not shown as the fleet.
+  const officeSceneReady = isOfficeSceneReady(agentsLoaded);
 
   const runningCount = state.agents.filter(
     (agent) =>
@@ -4600,12 +4653,17 @@ export function OfficeScreen({
       <section className="relative h-full min-h-0 min-w-0 overflow-hidden">
         {!officeSceneReady ? (
         <div
-          className="flex h-full w-full items-center justify-center bg-[radial-gradient(ellipse_at_center,#1c1208_0%,#0d0804_70%)]"
-          aria-hidden
+          className="flex h-full w-full flex-col items-center justify-center bg-[radial-gradient(ellipse_at_center,#1c1208_0%,#0d0804_70%)]"
+          aria-hidden={status !== "connected"}
         >
           <p className="select-none font-mono text-xs tracking-[0.4em] text-amber-100/25">
             HERMES3D PILOT002 ISOLATION
           </p>
+          {status === "connected" && !agentsLoaded ? (
+            <p className="mt-3 max-w-sm text-center font-mono text-[11px] text-amber-100/70">
+              {state.error?.trim() || "Sincronizando agentes del adapter…"}
+            </p>
+          ) : null}
         </div>
         ) : officeRenderMode === "2d" ? (
         <PixelOffice2D
@@ -4615,10 +4673,14 @@ export function OfficeScreen({
           renderMode={officeRenderMode}
           onRenderModeChange={handleOfficeRenderModeChange}
           onAgentChatSelect={(agentId) => {
+            if (openEmmaQa(agentId)) return;
+            setEmmaQaOpen(false);
             handleOpenAgentChat(agentId);
           }}
           onAddAgent={handleOpenCreateAgentWizard}
           onAgentEdit={(agentId) => {
+            if (openEmmaQa(agentId)) return;
+            setEmmaQaOpen(false);
             openAgentEditor(agentId, "avatar");
           }}
           onAgentDelete={(agentId) => {
@@ -4764,13 +4826,18 @@ export function OfficeScreen({
             setMonitorAgentId(agentId);
             if (agentId && !isRemoteOfficeAgentId(agentId)) {
               focusLocalAgent(agentId, { openChat: false });
+              if (!openEmmaQa(agentId)) setEmmaQaOpen(false);
             }
           }}
           onAgentChatSelect={(agentId) => {
+            if (openEmmaQa(agentId)) return;
+            setEmmaQaOpen(false);
             handleOpenAgentChat(agentId);
           }}
           onAddAgent={handleOpenCreateAgentWizard}
           onAgentEdit={(agentId) => {
+            if (openEmmaQa(agentId)) return;
+            setEmmaQaOpen(false);
             openAgentEditor(agentId, "avatar");
           }}
           onAgentDelete={(agentId) => {
@@ -4964,6 +5031,8 @@ export function OfficeScreen({
           </div>
         </div>
       ) : null}
+
+      <EmmaQaPanel open={emmaQaOpen} onClose={() => setEmmaQaOpen(false)} />
 
       {!debugEnabled ? (
         <HQSidebar

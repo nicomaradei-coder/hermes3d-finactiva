@@ -24,6 +24,51 @@ export type StudioBootstrapLoadCommand =
   | { kind: "apply-summary-patch"; agentId: string; patch: Partial<AgentState> }
   | { kind: "set-error"; message: string };
 
+/** Health can be up before agents.list returns. The roster is synced only after a hydrate. */
+export const FLEET_SYNC_TIMEOUT_MS = 12_000;
+export const FLEET_SYNC_RETRY_MS = 1_500;
+export const FLEET_SYNC_MAX_RETRIES = 4;
+
+export function fleetHydrationAccepted(commands: StudioBootstrapLoadCommand[]): boolean {
+  if (commands.some((command) => command.kind === "set-error")) return false;
+  return commands.some(
+    (command) => command.kind === "hydrate-agents" && command.seeds.length > 0,
+  );
+}
+
+/** A rejected list must not be written into the roster. Errors still surface. */
+export function commandsForFleetApply(
+  commands: StudioBootstrapLoadCommand[],
+  accepted: boolean,
+): StudioBootstrapLoadCommand[] {
+  if (accepted) return commands;
+  return commands.filter(
+    (command) =>
+      command.kind === "set-error" || command.kind === "set-gateway-config-snapshot",
+  );
+}
+
+/** Connected means the health probe succeeded. The scene waits for a real hydrate. */
+export function isOfficeSceneReady(agentsLoaded: boolean): boolean {
+  return agentsLoaded;
+}
+
+export function raceWithTimeout<T>(work: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 export async function runStudioBootstrapLoadOperation(params: {
   client: GatewayClientLike;
   gatewayUrl: string;
