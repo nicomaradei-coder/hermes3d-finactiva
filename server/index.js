@@ -140,7 +140,29 @@ async function main() {
       proxy.handleUpgrade(req, socket, head);
       return;
     }
-    handleUpgrade(req, socket, head);
+    let pending;
+    try {
+      pending = handleUpgrade(req, socket, head);
+    } catch (err) {
+      console.error("Upgrade handler failed.", err);
+      if (!socket.destroyed) socket.destroy();
+      return;
+    }
+    // Next's custom-server upgrade handler does not answer dev HMR sockets.
+    // An unanswered upgrade stalls Chrome's connection to this host, so the
+    // gateway WebSocket never leaves the browser. Close sockets Next did not
+    // write to.
+    Promise.resolve(pending).then(
+      () => {
+        if (!socket.destroyed && !socket.writableEnded && socket.bytesWritten === 0) {
+          socket.destroy();
+        }
+      },
+      (err) => {
+        console.error("Upgrade handler failed.", err);
+        if (!socket.destroyed) socket.destroy();
+      }
+    );
   };
 
   const httpsCert = useHttps ? await generateHttpsCert() : null;
